@@ -1,0 +1,36 @@
+#!/bin/sh
+# Server-side demuxing by default
+
+# shellcheck source=/dev/null
+. /etc/device_config
+ETH_IPADDR=$(fw_printenv -n ipaddr_eth 2> /dev/null)
+
+case "$1" in
+	start)
+		printf "Starting dhcpd Daemon: "
+		start-stop-daemon -S -q -p /var/run/udhcpd.pid -x /usr/sbin/udhcpd -- "$UDHCPD_CONF"
+		start-stop-daemon -S -q -p /var/run/udhcpdwan.pid -x /usr/sbin/udhcpd -- /etc/udhcpdwan.conf
+		if [ "$ETH_IPADDR" = "AP" ]; then
+			start-stop-daemon -S -q -p /var/run/udhcpdlan.pid -x /usr/sbin/udhcpd -- /etc/udhcpdlan.conf
+		fi
+		[ $? = 0 ] && echo "OK" || echo "FAIL"
+		;;
+
+	stop)
+		printf "Stopping dhcpd Daemon: "
+		start-stop-daemon -K -q -p /var/run/udhcpd.pid 2>/dev/null
+		start-stop-daemon -K -q -p /var/run/udhcpdwan.pid 2>/dev/null
+		start-stop-daemon -K -q -p /var/run/udhcpdlan.pid 2>/dev/null
+		[ $? = 0 ] && echo "OK" || echo "FAIL"
+		;;
+
+	restart)
+		$0 stop
+		sleep 1
+		$0 start
+		;;
+
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac

@@ -1,0 +1,96 @@
+#!/bin/sh
+set -e
+
+BOARD_DIR="$(dirname "$0")"
+
+grep -q mtd2 "${TARGET_DIR}/etc/fstab" || echo "mtd2 /mnt/jffs2 jffs2 rw,noatime 0 0" >> "${TARGET_DIR}/etc/fstab"
+
+# Prepare LICENSE.html
+if [ ! -e "${BINARIES_DIR}/msd" ]; then
+	mkdir "${BINARIES_DIR}/msd"
+fi
+
+cp "${BOARD_DIR}/LICENSE.template" "${BINARIES_DIR}/msd/LICENSE.html"
+cp -r "${BOARD_DIR}/msd/"* "${BINARIES_DIR}/msd/"
+python3 "${BOARD_DIR}/../../../Dashboard/bundle.py" "${BINARIES_DIR}/msd/dash/index.html"
+rm -rf "${BINARIES_DIR}/msd/dash/assets"
+LINUX_VERS=$(grep '^BR2_LINUX_KERNEL_VERSION' "${BR2_CONFIG}" | cut -d\" -f 2)
+UBOOT_VERS=$(grep '^BR2_TARGET_UBOOT_VERSION' "${BR2_CONFIG}" | cut -d\" -f 2)
+FW_VERSION=$(cd "${BOARD_DIR}" && git describe --abbrev=4 --always --tags)
+sed -i s/##DEVICE_FW##/${FW_VERSION}/g "${BINARIES_DIR}/msd/LICENSE.html"
+sed -i s/##LINUX_VERSION##/${LINUX_VERS}/g "${BINARIES_DIR}/msd/LICENSE.html"
+sed -i s/##UBOOT_VERSION##/${UBOOT_VERS}/g "${BINARIES_DIR}/msd/LICENSE.html"
+
+BR_VERSION=$(sed -n 's/^VERSION_ID=//p' "${TARGET_DIR}/etc/os-release" 2>/dev/null)
+
+# FPGA bitstream version — look up board name from boards.json then read bit.txt
+_defconfig=$(basename "$(grep '^BR2_DEFCONFIG' "${BR2_CONFIG}" | cut -d= -f2 | tr -d '"')")
+_board=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('${BOARD_DIR}/../../../boards.json'))
+    r = [b['board'] for b in d if b.get('defconfig') == '${_defconfig}']
+    print(r[0] if r else '')
+except: pass
+" 2>/dev/null)
+FPGA_VERS=$(cat "${BOARD_DIR}/../${_board}/bitstream/maia-iio/bit.txt" 2>/dev/null || echo "")
+
+{
+	echo "device-fw tezuka-${FW_VERSION}"
+	echo "uboot ${UBOOT_VERS}"
+	echo "buildroot ${BR_VERSION}"
+	[ -n "${FPGA_VERS}" ] && echo "fpga ${FPGA_VERS}" || true
+} > "${TARGET_DIR}/opt/VERSIONS"
+
+GENIMAGE_CFG="${BOARD_DIR}/genimage-msd.cfg"
+GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
+
+rm -rf "${GENIMAGE_TMP}"
+
+genimage                           \
+	--rootpath "${TARGET_DIR}"     \
+	--tmppath "${GENIMAGE_TMP}"    \
+	--inputpath "${BINARIES_DIR}/msd"  \
+	--outputpath "${TARGET_DIR}/opt/" \
+	--config "${GENIMAGE_CFG}"
+
+rm -f "${TARGET_DIR}/opt/boot.vfat"
+# iiod is started by S23udc with RT priority and FunctionFS support.
+# Remove Buildroot's standalone iiod init script to prevent double-start.
+rm -f "${TARGET_DIR}/etc/init.d/S99iiod"
+rm -f "${TARGET_DIR}/etc/init.d/S60iiod"
+rm -rf "${BINARIES_DIR}/msd"
+
+########################## ROOT FS INSTALL #############################
+
+INSTALL=install
+
+rm -Rf "${TARGET_DIR}/etc/dropbear"
+
+mkdir -p "${TARGET_DIR}/root/img"
+mkdir -p "${TARGET_DIR}/mnt/jffs2"
+mkdir -p "${TARGET_DIR}/mnt/msd"
+mkdir -p "${TARGET_DIR}/mnt/nfs"
+mkdir -p "${TARGET_DIR}/mnt/sd"
+mkdir -p "${TARGET_DIR}/etc/dropbear"
+mkdir -p "${TARGET_DIR}/var/spool/cron/crontabs"
+
+${INSTALL} -D -m 0644 "${BOARD_DIR}/msd/img/"* "${TARGET_DIR}/root/img/"
+# Static landing page — patched with #MODEL#/#SERIAL#/#IP#/etc by S40network
+# and S45msd at boot, then copied onto the USB mass-storage image as
+# info.html. Kept as a *static* page deliberately: unlike the live "/" page
+# below (reached over the network, where a real hostname exists), info.html
+# is opened offline from a mounted USB drive with no path back to this
+# device's MQTT broker — the live Dashboard's auto-connect would just throw
+# on an empty-host WebSocket URL and render nothing.
+${INSTALL} -D -m 0644 "${BOARD_DIR}/msd/index.html" "${TARGET_DIR}/root/info.html"
+# Dashboard is now the served root page ("/"), replacing the old static
+# landing page that used to link out to it from dash/index.html.
+python3 "${BOARD_DIR}/../../../Dashboard/bundle.py" "${TARGET_DIR}/root/index.html"
+
+ln -sf ../../wpa_supplicant/ifupdown.sh "${TARGET_DIR}/etc/network/if-up.d/wpasupplicant"
+ln -sf ../../wpa_supplicant/ifupdown.sh "${TARGET_DIR}/etc/network/if-down.d/wpasupplicant"
+ln -sf ../../wpa_supplicant/ifupdown.sh "${TARGET_DIR}/etc/network/if-pre-up.d/wpasupplicant"
+ln -sf ../../wpa_supplicant/ifupdown.sh "${TARGET_DIR}/etc/network/if-post-down.d/wpasupplicant"
+
+ln -sf device_reboot "${TARGET_DIR}/usr/sbin/pluto_reboot"

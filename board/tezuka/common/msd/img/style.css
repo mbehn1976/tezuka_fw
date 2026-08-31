@@ -1,0 +1,55 @@
+/* Landing page styles — imports shared base theme */
+@import url("base.css");
+
+body {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+/* ── Header ── */
+
+header {
+  margin-bottom: 0.75rem;
+}
+
+a.logo-link {
+  text-decoration: none;
+  display: inline-block;
+}
+
+a.logo-link:hover pre.logo {
+  color: var(--accent);
+}
+
+pre.logo {
+  font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--logo);
+  white-space: pre;
+  overflow-x: auto;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+/* ── Nav ── */
+
+nav {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Sections ── */
+
+section {
+  margin-bottom: 1.75rem;
+}
+
+th {
+  width: 38%;
+}
