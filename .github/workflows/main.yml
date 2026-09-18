@@ -111,6 +111,12 @@ jobs:
       BR2_EXTERNAL: ${{ github.workspace }}
       BR2_DL_DIR: /home/runner/br-dl
       OUTPUT_DIR: ${{ github.workspace }}/output/${{ matrix.board }}
+      # CMake 4.x (Buildroot's own host-cmake, bumped as part of the
+      # Buildroot 2026.05.2 update) hard-errors on any CMakeLists.txt with
+      # an old cmake_minimum_required() floor instead of just warning (see
+      # sourceme.first). CI calls `make -C buildroot` directly rather than
+      # through build.sh/sourceme.first, so it needs its own copy of this.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
     steps:
       - uses: actions/checkout@v6
@@ -176,7 +182,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.OUTPUT_DIR }}
-          key: output-${{ matrix.board }}-${{ hashFiles('package/**/*.mk', 'package/**/*.hash', 'buildroot.version', 'patches/buildroot/**', 'board/tezuka/common/patches/**', 'board/tezuka/**/kernel/**', format('configs/{0}', matrix.defconfig)) }}
+          key: output-${{ matrix.board }}-${{ hashFiles('package/**/*.mk', 'package/**/*.hash', 'package/**/Config.in', 'Config.in', 'buildroot.version', 'patches/buildroot/**', 'board/tezuka/common/patches/**', 'board/tezuka/**/kernel/**', format('configs/{0}', matrix.defconfig)) }}
 
       # uboot-env-hook.mk writes this in the source tree at U-Boot
       # extract time; with output/ cached, extract is skipped and the
