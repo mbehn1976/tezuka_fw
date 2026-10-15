@@ -68,6 +68,7 @@ SOURCES = [
     ('jsx', 'pages5.jsx'),
     ('jsx', 'radioastro.jsx'),
     ('jsx', 'classifier.jsx'),
+    ('jsx', 'iqwaterfall.jsx'),
     ('jsx', 'midi.jsx'),
     ('jsx', 'webtioune.jsx'),
     ('jsx', 'rftest.jsx'),
