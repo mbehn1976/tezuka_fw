@@ -1,4 +1,6 @@
-// pages2.jsx — DATV Controller, Versions, Analysis, Network
+// Modified by Christos Nikolaou (SV1EIA) 2026.
+// Christos Nikolaou can be reached by email at : sv1eia@gmail.com
+// pages2.jsx — DATV Controller, Versions, Network (the Analysis page is tsanalyzer.jsx)
 const { useState: useS2, useEffect: useE2, useRef: useR2 } = React;
 
 // useState backed by localStorage: initial value comes from the last saved
@@ -44,7 +46,8 @@ const QO100_ROWS = [
   },
 ];
 
-function QO100Plan({ currentUlHz, onSelect }) {
+// allowFixed: the beacon slot can be clicked too (a receiver can tune to it; the transmitter page cannot use it)
+function QO100Plan({ currentUlHz, onSelect, signals = [], allowFixed = false }) {
   const ref = React.useRef(null);
   const [W, setW] = useS2(260);
   const [hov, setHov] = useS2(null);
@@ -59,6 +62,15 @@ function QO100Plan({ currentUlHz, onSelect }) {
   const bw2w = bw => Math.max(1, bw / (QO100_HI - QO100_LO) * W - 1);
   const allSlots = QO100_ROWS.flatMap(r => r.slots.map(s => ({ ...s, row: r })));
   const hovSlot = allSlots.find(s => s.id === hov);
+
+  // Live signals (qo100wb.js, from the BATC spectrum feed): a slot lights up when a signal of its row's symbol
+  // rate (wide >= 1 MS, narrow 250-500 kS, very narrow <= 125 kS) is centred inside it; the beacon lights BCN.
+  const rowOfSr = sr => sr >= 1000 ? 'wide' : sr >= 250 ? 'narrow' : 'vn';
+  const liveBySlot = {};
+  for (const sig of signals)
+    for (const row of QO100_ROWS)
+      for (const s of row.slots)
+        if (sig.beacon ? s.id === 'bcn' : (row.key === rowOfSr(sig.sr) && Math.abs(sig.freq - s.dl) <= s.bw / 2 + 0.01)) liveBySlot[s.id] = sig;
 
   // Current TX frequency marker (convert UL → DL)
   const curDl = currentUlHz ? currentUlHz / 1e6 - QO100_DL2UL : null;
@@ -95,15 +107,17 @@ function QO100Plan({ currentUlHz, onSelect }) {
               const x = f2x(s.dl - s.bw / 2);
               const sw = bw2w(s.bw);
               const isHov = hov === s.id;
+              const live = liveBySlot[s.id];
               const color = s.id === 'bcn' ? 'var(--c-coral)' : row.color;
               return (
                 <g key={s.id}
-                   style={{ cursor: s.fixed ? 'default' : 'pointer' }}
+                   style={{ cursor: s.fixed && !allowFixed ? 'default' : 'pointer' }}
                    onMouseEnter={() => setHov(s.id)}
                    onMouseLeave={() => setHov(null)}
-                   onClick={() => !s.fixed && onSelect((s.dl + QO100_DL2UL) * 1e6, s.sr)}>
+                   onClick={() => (!s.fixed || allowFixed) && onSelect((s.dl + QO100_DL2UL) * 1e6, s.sr)}>
                   <rect x={x} y={row.y} width={sw} height={row.h}
-                    fill={color} fillOpacity={isHov ? 1 : 0.55} rx={1} />
+                    fill={color} fillOpacity={live || isHov ? 1 : 0.55} rx={1}
+                    stroke={live ? 'white' : 'none'} strokeWidth={live ? 1.5 : 0} />
                   {sw > 16 && (
                     <text x={x + sw/2} y={row.y + row.h/2 + 3.5}
                       textAnchor="middle" fontSize={8} fill="white" fontWeight="600"
@@ -117,6 +131,12 @@ function QO100Plan({ currentUlHz, onSelect }) {
           </g>
         ))}
 
+        {/* Where each live signal really sits: its measured width, just above the axis */}
+        {signals.map((sig, i) => (
+          <rect key={i} x={f2x(sig.start)} y={AXIS_Y - 4} width={Math.max(2, f2x(sig.end) - f2x(sig.start))} height={3}
+            fill="white" fillOpacity={sig.beacon ? 0.45 : 0.9} />
+        ))}
+
         {/* Current frequency marker */}
         {curDl && curDl >= QO100_LO && curDl <= QO100_HI && (
           <line x1={f2x(curDl)} y1={16} x2={f2x(curDl)} y2={AXIS_Y}
@@ -128,7 +148,7 @@ function QO100Plan({ currentUlHz, onSelect }) {
           <g>
             <rect x={0} y={0} width={W} height={16} fill="var(--bg-card)" fillOpacity={0.92} />
             <text x={W/2} y={11} textAnchor="middle" fontSize={9} fill="var(--fg)">
-              {hovSlot.label || hovSlot.id.toUpperCase()} · DL {hovSlot.dl.toFixed(2)} · UL {(hovSlot.dl+QO100_DL2UL).toFixed(2)} MHz · {(hovSlot.sr/1000).toFixed(0)} kS
+              {hovSlot.label || hovSlot.id.toUpperCase()} · DL {hovSlot.dl.toFixed(2)} · UL {(hovSlot.dl+QO100_DL2UL).toFixed(2)} MHz · {(hovSlot.sr/1000).toFixed(0)} kS{liveBySlot[hovSlot.id] ? ` · live ${liveBySlot[hovSlot.id].sr} kS, ${liveBySlot[hovSlot.id].level.toFixed(0)} dB` : ''}
             </text>
           </g>
         )}
@@ -624,39 +644,6 @@ function Versions({ ver }) {
               </a>
             </div>
           </div>
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-// ---- Analysis -------------------------------------------------------------
-function Analysis({ d }) {
-  const [bufH, setBufH] = useS2(() => Array.from({ length: 60 }, () => 60 + Math.random() * 20));
-  useE2(() => {
-    const id = setInterval(() => setBufH((p) => [...p.slice(1), Math.max(20, Math.min(98, p[p.length - 1] + (Math.random() - 0.5) * 14))]), 1000);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <div className="page">
-      <div className="grid-12">
-        <Card title="Transport stream rate" sub="DVB output bitrate" className="span-6"
-          right={<span className="big-readout mono">{d.tsBitrate.toFixed(2)}<i>Mb/s</i></span>}>
-          <StreamChart maxY={3} unit="" fmt={(v) => v.toFixed(1)} series={[{ data: d.tsH, color: "var(--c-blue)" }]} />
-        </Card>
-        <Card title="Video buffer fill" sub="Encoder output buffer" className="span-6"
-          right={<span className="big-readout mono">{bufH[bufH.length - 1].toFixed(0)}<i>%</i></span>}>
-          <StreamChart maxY={100} unit="%" grid={5} fmt={(v) => v.toFixed(0)} series={[{ data: bufH, color: "var(--accent-2)" }]} />
-        </Card>
-        <Card title="PID table" sub="Active program identifiers" className="span-12" pad={false}>
-          <table className="ver-table">
-            <thead><tr><th>PID</th><th>Type</th><th>Codec</th><th>Bitrate</th><th>Continuity</th></tr></thead>
-            <tbody>
-              {[["0x0000", "PAT", "—", "—", "ok"], ["0x1000", "PMT", "—", "—", "ok"], ["0x0100", "Video", "H.265", "256 Kb/s", "ok"], ["0x0101", "Audio", "AAC", "32 Kb/s", "ok"], ["0x1FFF", "Null", "—", "43 Kb/s", "ok"]].map((r) => (
-                <tr key={r[0]}><td className="mono vt-ver">{r[0]}</td><td className="vt-name">{r[1]}</td><td className="dim">{r[2]}</td><td className="mono">{r[3]}</td><td><Pill tone="ok" dot>no errors</Pill></td></tr>
-              ))}
-            </tbody>
-          </table>
         </Card>
       </div>
     </div>
@@ -2640,7 +2627,66 @@ function fmtClkrefFreq(freq) {
   return `${hz} Hz`;
 }
 
+// ADF4001 boards (PlutoSky R2): the FPGA closes the loop only while a valid
+// 10 MHz is detected and reports the chip's lock detect; see RefFix in the
+// board documentation. The LED on the case shows the same lock state.
+const CLKREF_STATE_LABELS = {
+  absent:  ['No reference', 'neutral'],
+  acquire: ['Acquiring',    'warn'],
+  locked:  ['Locked',       'ok'],
+  recheck: ['Re-checking',  'warn'],
+};
+const CLKREF_MODE_OPTIONS = [
+  { v: 'auto',     l: 'Automatic (follow the detector)' },
+  { v: 'external', l: 'External: loop always closed' },
+  { v: 'internal', l: 'Internal: VCTCXO free-running' },
+];
+
+function ClockRefAdf4001({ d }) {
+  const state = d.clkrefState || '';
+  const [stateLabel, stateTone] = CLKREF_STATE_LABELS[state] || ['Unknown', 'neutral'];
+  const present = d.clkrefPresent === '1';
+  const cp = d.clkrefCp === '1';
+  const mode = ['auto', 'external', 'internal'].includes(d.clkrefMode) ? d.clkrefMode : 'auto';
+  const count = d.clkrefCount;
+  const countHint = count == null ? '' : `${count} R-divider edges per 102.4 us window (1024 = 10.000 MHz; tens of thousands = open input)`;
+
+  return (
+    <div className="page">
+      <div className="datv-head">
+        <div className="datv-title">
+          <h1>Reference Clock</h1>
+          <span className="datv-sub mono">ADF4001 PLL locking the 40 MHz VCTCXO to the 10 MHz input (CLKIN)</span>
+        </div>
+      </div>
+
+      <div className="grid-12">
+        <Card title="Reference clock" sub="What the FPGA sees on the ADF4001" className="span-12">
+          <div style={{ display: "flex", alignItems: "center", gap: "2em", flexWrap: "wrap" }}>
+            <Field label="Lock status">
+              <Pill tone={stateTone} dot>{stateLabel}</Pill>
+            </Field>
+            <Field label="10 MHz input" hint={countHint || undefined}>
+              <Pill tone={present ? "ok" : "neutral"} dot>{present ? "Present" : "Not detected"}</Pill>
+            </Field>
+            <Field label="Charge pump" hint="Active = loop closed, VCTCXO steered by the reference">
+              <span className="mono">{cp ? "active" : "three-state"}</span>
+            </Field>
+            <Field label="Mode" hint="Stored in the boot environment; applied at once, no reboot">
+              <Select value={mode} onChange={(v) => d.publish('system/clkref/mode', v)} options={CLKREF_MODE_OPTIONS} />
+            </Field>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <Pill tone="neutral" dot>Yellow LED on the case: on = locked, off = not locked (no reference, or loop forced open)</Pill>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function ClockRef({ d }) {
+  if (d.clkrefHw === 'adf4001') return <ClockRefAdf4001 d={d} />;
   const source = d.clkrefSource || '';
   const locked = d.clkrefLock === '1';
   const freq = d.clkrefFrequency;
@@ -2702,4 +2748,4 @@ function ClockRef({ d }) {
   );
 }
 
-Object.assign(window, { DATV, Versions, Analysis, Network, Transverter, IQTape, SigGen, Calibrate, Diagnostic, Reboot, Operator, Kalibrate, Persistent, Performance, GPIO, GpsPage, ClockRef });
+Object.assign(window, { DATV, Versions, Network, Transverter, IQTape, SigGen, Calibrate, Diagnostic, Reboot, Operator, Kalibrate, Persistent, Performance, GPIO, GpsPage, ClockRef });

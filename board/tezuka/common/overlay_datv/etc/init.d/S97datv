@@ -1,0 +1,44 @@
+#!/bin/sh
+
+start() {
+
+/root/mqtt_longmynd.sh </dev/null 2>/dev/null &
+
+# zynqrx (DVB-S2 receiver) comes up idle: MQTT and the WebSocket/UDP outputs only.
+# The Dashboard's Webtioune page (cmd/zynqrx/process start) starts the demodulator.
+if [ -x /usr/bin/start_zynqrx ]; then
+	AUTOSTART=0 /usr/bin/start_zynqrx
+fi
+
+}
+
+stop() {
+
+	echo "Stopping"
+	killall zynqrx 2>/dev/null
+}
+
+restart() {
+	stop
+	start
+}
+
+# start/stop/restart
+case "$1" in
+  start)
+	start
+	;;
+  stop)
+	stop
+	;;
+  restart)
+	restart
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit $?
+
+
