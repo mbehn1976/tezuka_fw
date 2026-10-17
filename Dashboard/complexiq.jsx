@@ -9,7 +9,7 @@
 // The stream is shown as one complex spectrum X[f] = I + jQ in four views:
 //   Magnitude / Phase   dB over frequency, phase in rad (-pi..+pi) over frequency
 //   Real / Imaginary    I and Q in LSB over frequency
-//   Bode plot           dB and unwrapped phase in degrees over log frequency offset
+//   Bode plot           dB and phase in degrees (wrapped to -180..+180, or unwrapped) over log frequency offset
 //   Smith chart         Gamma = X[f] / X[peak], frequency colour coded
 // Every axis carries its unit. The level is 20*log10 of the int16 bin value
 // ("dB re 1 LSB"), not dBm: there is no absolute calibration.
@@ -219,7 +219,7 @@ function ciqDrawReIm(ctx, w, h, st, an, norm) {
   return { kind: 'lin', r: r1, ax, rects: [r1, r2] };
 }
 
-function ciqDrawBode(ctx, w, h, st, an, thrDb, side) {
+function ciqDrawBode(ctx, w, h, st, an, thrDb, side, wrap) {
   const L = 70, R = 34, T = 38, GAP = 16, B = 40;
   const ph = (h - T - B - GAP) / 2;
   const r1 = { x: L, y: T, w: w - L - R, h: ph }, r2 = { x: L, y: T + ph + GAP, w: w - L - R, h: ph };
@@ -257,7 +257,8 @@ function ciqDrawBode(ctx, w, h, st, an, thrDb, side) {
     if (m >= 1 && m <= kMax) ciqMarker(ctx, r1, p1.X(Math.log10(binHz * m)), p1.Y(an.db[k]),
       [tag + ': ' + ciqFmtF(st, k) + ' (offset ' + (st.spanHz != null ? paFmtHz(binHz * m, 1) : m + ' bins') + ')', an.db[k].toFixed(1) + ' dB'], CIQ_MK[i]);
   });
-  // unwrapped phase in degrees, per contiguous run of bins within thrDb of the peak
+  // phase in degrees, per contiguous run of bins within thrDb of the peak: wrapped to
+  // -180..+180 (the line is broken where the phase jumps across the wrap) or unwrapped
   const min = an.pkDb - thrDb;
   const runs = []; let cur = null; let prev = 0, acc = 0;
   for (let m = 1; m <= kMax; m++) {
@@ -268,21 +269,29 @@ function ciqDrawBode(ctx, w, h, st, an, thrDb, side) {
     else {
       let d = p - prev; d -= 2 * Math.PI * Math.round(d / (2 * Math.PI)); acc += d;
     }
-    prev = p; cur.push([m, acc * 180 / Math.PI]);
+    prev = p; cur.push([m, (wrap ? p : acc) * 180 / Math.PI]);
   }
-  let pmin = -180, pmax = 180;
-  for (const run of runs) for (const [, v] of run) { pmin = Math.min(pmin, v); pmax = Math.max(pmax, v); }
-  const ps = paTicks(Math.floor(pmin / 90) * 90, Math.ceil(pmax / 90) * 90, 6);
-  const y0 = ps.ticks[0], y1 = ps.ticks[ps.ticks.length - 1];
+  let y0 = -180, y1 = 180, ps;
+  if (wrap) {
+    ps = { ticks: [-180, -90, 0, 90, 180] };
+  } else {
+    let pmin = -180, pmax = 180;
+    for (const run of runs) for (const [, v] of run) { pmin = Math.min(pmin, v); pmax = Math.max(pmax, v); }
+    ps = paTicks(Math.floor(pmin / 90) * 90, Math.ceil(pmax / 90) * 90, 6);
+    y0 = ps.ticks[0]; y1 = ps.ticks[ps.ticks.length - 1];
+  }
   const p2 = paPanel(ctx, r2, { ...ax, topTicks: null, topLabel: null, y0, y1,
-    yTicks: ps.ticks.map((v) => ({ v, label: String(Math.round(v)) })), yLabel: 'Phase (deg, unwrapped)', showX: true });
+    yTicks: ps.ticks.map((v) => ({ v, label: String(Math.round(v)) })),
+    yLabel: wrap ? 'Phase (deg, -180 to +180)' : 'Phase (deg, unwrapped)', showX: true });
   ctx.save(); ctx.beginPath(); ctx.rect(r2.x, r2.y, r2.w, r2.h); ctx.clip();
   ctx.strokeStyle = CIQ_COL.im; ctx.fillStyle = CIQ_COL.im; ctx.lineWidth = 1.2;
   for (const run of runs) {
     ctx.beginPath();
-    run.forEach(([m, v], i) => {
+    let penUp = true, lastV = 0;
+    run.forEach(([m, v]) => {
       const x = p2.X(Math.log10(binHz * m)), y = p2.Y(v);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      if (penUp || Math.abs(v - lastV) > 180) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      penUp = false; lastV = v;
     });
     ctx.stroke();
     for (const [m, v] of run) ctx.fillRect(p2.X(Math.log10(binHz * m)) - 2, p2.Y(v) - 2, 4, 4);
@@ -383,12 +392,14 @@ function ComplexIqPage({ d }) {
   const thrRef = useRCx(40);
   const normRef = useRCx('unitrot');
   const sideRef = useRCx(1);
+  const wrapRef = useRCx(true);
   const holdRef = useRCx(false);
   const cfgRef = useRCx({ centerHz: null, spanHz: null });
   const [mode, setMode] = useSCx('magphase');
   const [thr, setThr] = useSCx(40);
   const [norm, setNorm] = useSCx('unitrot');
   const [side, setSide] = useSCx(1);
+  const [wrapPh, setWrapPh] = useSCx(true);
   const [hold, setHold] = useSCx(false);
   const [wsState, setWsState] = useSCx('connecting');
   const [peak, setPeak] = useSCx(null);
@@ -403,6 +414,7 @@ function ComplexIqPage({ d }) {
   useECx(() => { thrRef.current = thr; dirtyRef.current = true; }, [thr]);
   useECx(() => { normRef.current = norm; dirtyRef.current = true; }, [norm]);
   useECx(() => { sideRef.current = side; dirtyRef.current = true; }, [side]);
+  useECx(() => { wrapRef.current = wrapPh; dirtyRef.current = true; }, [wrapPh]);
   useECx(() => { holdRef.current = hold; }, [hold]);
   useECx(() => { dirtyRef.current = true; }, [centerHz, spanHz]);
 
@@ -464,7 +476,7 @@ function ComplexIqPage({ d }) {
       let geo;
       if (m === 'magphase') geo = ciqDrawMagPhase(ctx, cw, ch, st, an, thrDb);
       else if (m === 'reim') geo = ciqDrawReIm(ctx, cw, ch, st, an, normRef.current);
-      else if (m === 'bode') geo = ciqDrawBode(ctx, cw, ch, st, an, thrDb, sideRef.current);
+      else if (m === 'bode') geo = ciqDrawBode(ctx, cw, ch, st, an, thrDb, sideRef.current, wrapRef.current);
       else geo = ciqDrawSmith(ctx, cw, ch, st, an, thrDb);
       geoRef.current = { ...geo, an, st };
       // cursor
@@ -589,6 +601,12 @@ function ComplexIqPage({ d }) {
               <button className={side < 0 ? 'seg-on' : ''} onClick={() => setSide(-1)}>- offsets</button>
             </div>
           )}
+          {mode === 'bode' && (
+            <div className="seg">
+              <button className={wrapPh ? 'seg-on' : ''} onClick={() => setWrapPh(true)}>phase wrapped</button>
+              <button className={!wrapPh ? 'seg-on' : ''} onClick={() => setWrapPh(false)}>phase unwrapped</button>
+            </div>
+          )}
           <button className="btn ghost" onClick={() => setHold(!hold)}>{hold ? 'Resume' : 'Hold'}</button>
         </div>
         <div style={{ position: 'relative', width: '100%', height: 600 }}>
@@ -603,7 +621,7 @@ function ComplexIqPage({ d }) {
         <p className="dim" style={{ marginTop: 8 }}>
           {mode === 'magphase' && 'Top: magnitude 20·log10(|X|) in dB re 1 LSB (uncalibrated, not dBm). Bottom: phase atan2(Q, I) in rad from -π to +π, colour = phase.'}
           {mode === 'reim' && (norm === 'raw' ? 'Real part I (top) and imaginary part Q (bottom) of every bin in LSB of the int16 FFT output (autoscaled).' : (norm === 'unitrot' ? 'Real part (top) and imaginary part (bottom) of every bin divided by the complex value of the strongest bin (so the peak is exactly 1 + j0)' : 'Real part (top) and imaginary part (bottom) of every bin divided by the magnitude of the strongest bin (the peak lies on the unit circle, its phase still changes from frame to frame)') + '. Fixed scale -1.1 to +1.1. The readout line below stays in LSB.')}
-          {mode === 'bode' && 'Magnitude in dB and phase in degrees (unwrapped inside each run of bins) over the frequency offset from the LO on a log axis, one side at a time. The phase is only meaningful where a signal is present.'}
+          {mode === 'bode' && 'Magnitude in dB and phase in degrees (wrapped to -180..+180, or unwrapped inside each run of bins) over the frequency offset from the LO on a log axis, one side at a time. The phase is only meaningful where a signal is present.'}
           {mode === 'smith' && 'Γ = X[f] / X[peak]: every bin normalised to the strongest one (|Γ| ≤ 1), colour = frequency. Constant-r circles and constant-x arcs are those of a normalised Smith chart.'}
         </p>
       </Card>

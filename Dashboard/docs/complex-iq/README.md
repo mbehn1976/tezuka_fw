@@ -19,7 +19,7 @@
    |---|---|
    | Magnitude / Phase | top: `20*log10 abs(X)` in dB re 1 LSB over frequency (MHz); bottom: phase `atan2(Q, I)` in rad from -pi to +pi over frequency, dots coloured by phase |
    | Real / Imaginary | top: real part, bottom: imaginary part, both over frequency (MHz), different colours. Scale selectable: unit circle with the peak rotated to 1 + j0 (default, fixed scale -1.1 to +1.1, does not fluctuate), unit circle (divided by the peak magnitude only, the peak phase still changes from frame to frame), or raw LSB (autoscale) |
-   | Bode plot | top: dB over log frequency offset from the LO; bottom: unwrapped phase in degrees over the same axis; positive or negative offsets selectable |
+   | Bode plot | top: dB over log frequency offset from the LO; bottom: phase in degrees over the same axis, wrapped to -180..+180 (default, the line is broken where the phase jumps across the wrap) or unwrapped inside each run of bins (switch `phase wrapped / phase unwrapped`); positive or negative offsets selectable |
    | Smith chart | `Gamma = X[f] / X[peak]` (each bin normalised to the strongest bin, so abs(Gamma) <= 1), constant-r circles and constant-x arcs with labels, Re/Im(Gamma) scales, points coloured by frequency with a colour bar in MHz |
 
    Magnitude/Phase, Real/Imaginary and Bode have a bin-number scale along the top edge (0 to 4096
@@ -229,24 +229,36 @@ Independent python decode of the stream, then the page (images with the dashboar
   0.164 + j0.176 (Pluto+) and 0.193 + j0.156 (Pluto); recomputed from the page's own magnitude and
   phase readout this is 0.164 + j0.175 and 0.193 + j0.156.
 * Bode: the offset of the peak from the LO reads 770.9 kHz (Pluto+, bin 3311, 770.87 kHz expected) and
-  869.1 kHz (Pluto, bin 2404, 869.14 kHz expected).
+  869.1 kHz (Pluto, bin 2404, 869.14 kHz expected). The phase is wrapped to -180..+180 by default (Pluto+ page: peak -91.2
+  deg, second tone -2.7 deg, `boardserved-plutoplus-complexiq-bode-wrapped.png`); the unwrapped option shows the same tones
+  between about +200 and -500 deg (`boardserved-plutoplus-complexiq-bode-unwrapped.png`). The other Bode screenshots in this
+  folder were taken before the wrapped option and show the unwrapped phase.
 * Smith chart: the peak at Gamma = 1.00 + j0.00, the second tone at 0.18 + j0.16 (Pluto+) and
   -0.14 - j0.21 (Pluto), |Gamma| 0.24 and 0.25; recomputed from the readout phases: 0.184 + j0.155 and
   -0.137 - j0.207.
 
 Final test on firmware images built from this branch rebased onto upstream main (Pluto from the `.frm`, Pluto+
 from the SD image; both serve the page from the image, identical to a fresh `bundle.py` of the source, and
-the bitstreams equal their packages). RF suite (I/Q check with automatic carrier offset, phase check and
-frame phase check at 2.5, 10, 20, 30.72 and 61.44 MS/s, both boards, the other board transmits): 30
-steps, 70 checks ok, 0 FAIL, every settings restore matched.
+the bitstreams equal their packages). The full RF suite (I/Q check with automatic carrier offset, phase check and
+frame phase check at 2.5, 10, 20, 30.72 and 61.44 MS/s, both boards, the other board transmits) was run on two builds
+of the final state; the dashboard bundle is byte-identical in both (the second build only differs in
+documentation). Both runs: 30 steps, 70 checks ok, 0 FAIL, every settings restore matched.
 
-* I/Q frame rotation measured minus predicted -0.0009 to +0.0023 rad, scatter at most 0.0019 rad, no frame
-  off by more than 0.3 rad; OFDM log correlation 0.989 to 0.999; phase-derived frequency minus time domain
-  -10.2 to +2.4 Hz.
-* Phase check model error 0.09 to 1.02 deg and at most 0.30 dB, I/Q against raw at most 11.2 deg, 6 or 7 bins
-  scored per tone; the fractional bin positions of the 30 tones cover 0.08 to 1.0.
-* Spectrum page served by the Pluto (image): markers P1 2400.869565 MHz 93.3 dB, P2 2400.891549 MHz
-  81.3 dB; FSW on the Pluto page see above (`radioastro-fsw-fixed-strong-integ30-pluto.jpg`).
+| | run 1 | run 2 | both |
+|---|---|---|---|
+| I/Q frame rotation, measured minus predicted (rad) | -0.0009 to +0.0023 | -0.0009 to +0.0023 | -0.0009 to +0.0023 |
+| frame rotation scatter (rad), frames off by more than 0.3 rad | at most 0.0019, none | at most 0.0019, none | at most 0.0019, none |
+| OFDM log correlation | 0.989 to 0.999 | 0.987 to 0.999 | 0.987 to 0.999 |
+| phase-derived minus time-domain frequency (Hz) | -10.2 to +2.4 | -12.2 to +2.9 | -12.2 to +2.9 |
+| phase model error (deg / dB) | 0.09 to 1.02 / at most 0.30 | 0.06 to 0.99 / at most 0.30 | 0.06 to 1.02 / at most 0.30 |
+| I/Q against raw phase difference (deg) | at most 11.2 | at most 13.9 | at most 13.9 |
+| bins scored per tone / fractional bin position of the 30 tones | 6 or 7 / 0.08 to 1.0 | 6 or 7 / 0.0 to 0.92 | 6 or 7 / 0.0 to 1.0 |
+
+* Spectrum page served by the boards: Pluto (run 1) P1 2400.869565 MHz 93.3 dB, P2 2400.891549 MHz 81.3 dB; Pluto+
+  (run 2) P1 2400.769419 MHz 93.1 dB, P2 2400.791402 MHz 80.9 dB. FSW on the Pluto page: see above
+  (`radioastro-fsw-fixed-strong-integ30-pluto.jpg`). The CAL and the Complex I/Q view results of this section were measured on pages served
+  by the earlier newdash4 images, the FSW results on newdash5 and newdash6 images (the only dashboard code change after newdash4 is the
+  FSW frame skip); in run 2 only the Spectrum page was spot-checked.
 
 Two notes from the suite runs, both about the test scripts (maia-sdr PR #12), not the page: (a) with the tone
 close to a half-bin position the per-frame I/Q peak can split over two neighbouring bins, which `rf_iq_check.py`
@@ -282,8 +294,8 @@ On the complex page, magnitude bins that are exactly zero are drawn at -6 dB (th
 * Chrome only; no touch, no other browsers; high-DPI scaling only in the new page. Other boards were not tested
   (the complex page needs the I/Q channel of maia-sdr PR #12).
 * The final Reference match label layout was only checked with a synthetic curve (section 3).
-* The Bode phase is unwrapped inside each run of bins above the threshold; for a single tone it only shows the
-  window leakage. It is meaningful for a broadband stimulus (see the synthetic low-pass).
+* The Bode phase is wrapped (or, selectable, unwrapped inside each run of bins above the threshold); for a single
+  tone it only shows the window leakage. It is meaningful for a broadband stimulus (see the synthetic low-pass).
 * The Smith chart normalises to the strongest bin. It is a display of the spectrum, not an S11 measurement.
 * Level is uncalibrated (dB re 1 LSB on the complex page, 10*log10 of the spectrometer power elsewhere), not dBm.
   Other pages with plots (signal generator, Webtioune, QO-100 spectrum, charts on the overview) were not changed.
