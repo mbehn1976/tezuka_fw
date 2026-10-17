@@ -20,11 +20,13 @@
    | View | Plots |
    |---|---|
    | Magnitude / Phase | top: `20*log10 abs(X)` in dB re 1 LSB over frequency (MHz); bottom: phase `atan2(Q, I)` in rad from -pi to +pi over frequency, dots coloured by phase |
-   | Real / Imaginary | top: I in LSB, bottom: Q in LSB, both over frequency (MHz), different colours |
+   | Real / Imaginary | top: real part, bottom: imaginary part, both over frequency (MHz), different colours. Scale selectable: unit circle with the peak rotated to 1 + j0 (default, fixed scale -1.1 to +1.1, does not fluctuate), unit circle (divided by the peak magnitude only, the peak phase still changes from frame to frame), or raw LSB (autoscale) |
    | Bode plot | top: dB over log frequency offset from the LO; bottom: unwrapped phase in degrees over the same axis; positive or negative offsets selectable |
    | Smith chart | `Gamma = X[f] / X[peak]` (each bin normalised to the strongest bin, so abs(Gamma) <= 1), constant-r circles and constant-x arcs with labels, Re/Im(Gamma) scales, points coloured by frequency with a colour bar in MHz |
 
-   A readout line under the plot gives the peak (excluding DC +-2 bins) and the bin under the
+   Magnitude/Phase, Real/Imaginary and Bode have a bin-number scale along the top edge (0 to 4096 with 2048 = LO; for Bode the offset from the LO in bins) in addition to the frequency scale.
+
+A readout line under the plot gives the peak (excluding DC +-2 bins) and the bin under the
    cursor: frequency in MHz, dB, phase in rad and degrees, I, Q and bin number. `Hold`
    freezes the stream. Phase dots, the Bode phase and the Smith chart only use bins within a
    selectable distance (20 to 80 dB) of the peak, because the phase of a noise bin is random.
@@ -137,6 +139,27 @@ at least 6 bins from the peak and from DC). Board-served, 10 MS/s:
 Screenshots `boardserved-*-uneven-tones-magphase.jpg`. The measured ratio is 12.2 and 12.1 dB
 (python 12.2 and 11.9 dB) against 12.04 dB transmitted.
 
+### 5. Normalised real and imaginary part, bin scale
+
+Synthetic stream (`mock_iq_waterfall.py tones`): the strongest tone (86.0 dB, +0.5 rad) plots at
+exactly Re 1.0, Im 0.0 with the default scale, and the 74.0 dB tone (12.0 dB below, +2.5 rad,
+so 2.0 rad ahead of the peak) reads normalised Re -0.104, Im +0.227 at the cursor, as
+0.25 cos 2 and 0.25 sin 2 predict. On the Pluto+ with the two real tones the plot shows the
+peak at 1.0 and the peak phase no longer moves between frames
+(`boardserved-plutoplus-reim-unitcircle.jpg`, `boardserved-plutoplus-binscale-*.jpg`).
+
+### 6. Peak markers
+
+Every view marks the strongest bin (yellow, `1:`) and the second strongest (blue, `2:`) with a
+triangle on the trace and a label with its frequency in MHz and level in dB (Magnitude/Phase:
+also the phase in rad on the phase plot; Real/Imaginary: the real or imaginary value, normalised
+or in LSB, and the level; Bode: also the offset from the LO; Smith: also Gamma). The markers
+follow the peaks from frame to frame. Board check on the Pluto+ (unequal tones, 10 MS/s): marker 1
+at 2400.769043 MHz, 65.8 to 65.9 dB, marker 2 at 2400.791016 MHz, 53.7 to 53.8 dB, the same
+values as the readout line (`boardserved-plutoplus-markers-*.jpg`). In the Smith chart marker 2 reads
+Gamma = 0.06 + j0.25, magnitude 0.26, which is the 11.9 to 12.1 dB difference of the tones.
+Labels of the two markers can overlap when the peaks are only a few bins apart.
+
 ### Reproduce
 
 ```
@@ -145,6 +168,23 @@ python3 test/mock_iq_waterfall.py rc 8765         # or: tones 8766
 #   window._tezukaDevHost = '127.0.0.1:8765'      # and open the page again from the menu
 python3 test/reference_peak.py TXHOST RXHOST 10000000 two 40   # or: tone, uneq (second tone 12 dB lower)   # transmit and decode in python
 ```
+
+## Switching between the displays
+
+Switching Spectrum, Radio Astronomy, Signal Classifier and the complex page back and forth
+(checked on the Pluto+, 10 MS/s tone, reading `/api/spectrometer` and `/api/ad9361` after
+each switch): the complex page, Spectrum and Signal Classifier change nothing on the board.
+**Radio Astronomy does**: opening it sets the RX sample rate to 2.5 MS/s, the spectrometer to
+1 frame per second and gain mode manual, and leaving it does not restore them, so the
+Spectrum page afterwards shows a 2.5 MHz span at 1 fps (existing behaviour, unchanged).
+
+A strong signal can also look capped on the Spectrum page: bins above the REF level are drawn
+flat at the top edge. The test tone (about 65 dB on the complex page) read 206 dB on the
+Spectrum scale against the default REF of 130 dB, so its top was cut off. The Spectrum page
+now marks bins above REF with red ticks at the top edge and prints
+`OVER REF: peak <value> dB (raise REF)` (`boardserved-plutoplus-spectrum-over-ref-marker.jpg`).
+On the complex page, magnitude bins that are exactly zero are drawn at -6 dB (the plot floor is
+`20*log10(max(abs(X), 0.5))`), which shows as a flat floor in the noise.
 
 ## Limits and not tested
 
