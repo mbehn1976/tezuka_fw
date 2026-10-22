@@ -1,5 +1,9 @@
 # Axis scales and peak markers on the spectrum plots, Complex I/Q Frequency Data Stream page
 
+![The Complex I/Q Frequency Data Stream page on an original Pluto: magnitude and phase, real and imaginary, Bode plot (wrapped and unwrapped phase) and Smith chart, two tones 12 dB apart](complexiq-demo-pluto-views.gif)
+
+*The Complex I/Q page on an original Pluto (two tones from a Pluto+ over a 40 dB cable, `complexiq-demo-pluto-views.gif`).*
+
 ## What changed
 
 1. **Axis scales with units on the Spectrum, Radio Astronomy and Signal Classifier plots.**
@@ -46,6 +50,12 @@
    that arrives still shows the old LO, so a strong line limited the SIG - REF ratio. The
    two frames after every flip are now dropped (`fswSkipRef` in `radioastro.jsx`), see the
    FSW section.
+7. **CP-OFDM detector card on the Signal Classifier page.** The `cpdetect` program on the
+   board (`app/cpdetect`, tezuka_fw PR 498) can publish its result as `state/cpdetect/<key>`
+   (`cpdetect -l -i 2 -M -s <rate>`). The page receives those keys and shows detected or
+   not, FFT size, guard length, subcarrier spacing, symbol length, the fractional carrier
+   offset, peak and ratio; it shows `not running` when nothing arrived for 10 s. Display
+   only, no change on the board. Test: section 10.
 
 The Complex I/Q page needs the `/iq-waterfall` channel of maia-httpd (maia-sdr PR #12).
 Without it the page shows `disconnected` and no data. The raw capture card is unchanged.
@@ -267,6 +277,22 @@ printed a phase model error of 178.9 deg for a tone 0.51 of a bin from a bin cen
 alignment of `rf_phase_check.py` near a half-bin tone (reproduced on synthetic captures, not on the boards), fixed
 there; the final suite above uses the fixed script.
 
+### 10. CP-OFDM detector card
+
+An original Pluto receiving CP-OFDM (1024 subcarriers, guard 128, 2.5 MS/s, 2.4 GHz) from a Pluto+ over the
+40 dB cable, `cpdetect -l -i 2 -M -s 2500000` running on the Pluto, the page opened on the Signal Classifier
+(`boardserved-pluto-classifier-cpdetect.jpg`):
+
+| Situation | Card |
+|---|---|
+| OFDM on air | detected: N 1024, G 128, spacing 2.441 kHz, symbol length 460.8 us, carrier offset 0.35 of the spacing (853 Hz, fractional part only), peak 0.993, ratio 5.03 |
+| transmitter silent, `cpdetect` running | nothing found |
+| `cpdetect` stopped | not running after 10 s |
+
+The page was loaded from the Pluto's RAM (the bundle built from this branch copied over `/root/index.html`);
+the flashed firmware images used for the other tests do not contain the card. The result matches the
+`cpdetect` host and board tests (tezuka_fw PR 498).
+
 ### Reproduce
 
 ```
@@ -300,5 +326,7 @@ On the complex page, magnitude bins that are exactly zero are drawn at -6 dB (th
 * Level is uncalibrated (dB re 1 LSB on the complex page, 10*log10 of the spectrometer power elsewhere), not dBm.
   Other pages with plots (signal generator, Webtioune, QO-100 spectrum, charts on the overview) were not changed.
 * In CAL or FSW mode the page shows a ratio in dB and the peak markers then mark the strongest ratio bins.
-* FSW on the Pluto's own page was tested at INTEG 30 s only; the stale frame count after a retune was measured at
-  a 0.42 s frame period, not at the page's 1 fps.
+* FSW on the Pluto's own page was tested at INTEG 30 s (above) and, on the final firmware image, at INTEG 5 s and
+  1 s: a strong tone read +67.8 dB and +68.3 dB above the reference band with a flat baseline (page gain 40 dB,
+  Pluto+ transmitting; a different gain from the host-served runs, so the level is not comparable with their
+  +73 dB). The stale frame count after a retune was measured at a 0.42 s frame period, not at the page's 1 fps.
