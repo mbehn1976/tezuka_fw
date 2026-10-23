@@ -1,0 +1,4 @@
+#!/bin/sh
+# libiio 1.0 merged iio_readdev and iio_writedev into iio_rwdev; keep the old
+# name working for existing scripts.
+exec iio_rwdev "$@"
