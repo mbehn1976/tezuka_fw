@@ -1,0 +1,22 @@
+config BR2_PACKAGE_LIBIIO0
+	bool "libiio0 (libiio 0.26 for programs that use the 0.x API)"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_LIBIIO
+	select BR2_PACKAGE_HOST_PATCHELF
+	help
+	  A private copy of libiio 0.26 (library only) installed in
+	  /usr/libiio0/lib, next to the libiio 1.0 of the system.
+
+	  libiio 1.0 changed the API and ABI. Programs that still use the
+	  0.x API (libad9361-iio, SoapyPlutoSDR, kalibrate and the
+	  prebuilt plutotx) are built against this copy and find it
+	  through an rpath. The libiio.so.0 compatibility layer of
+	  libiio 1.0 does not replace it: it runs these programs, but
+	  with a different buffer model (no non-blocking mode, no
+	  partial kernel buffer allocation), and SoapyPlutoSDR does not
+	  stream through it.
+
+	  https://github.com/analogdevicesinc/libiio
+
+comment "libiio0 needs a toolchain w/ threads"
+	depends on !BR2_TOOLCHAIN_HAS_THREADS
