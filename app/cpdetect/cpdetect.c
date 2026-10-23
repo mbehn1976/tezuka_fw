@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 #ifndef NO_IIO
-#include <iio.h>
+#include <iio/iio.h>
 #endif
 
 #define MIN_PEAK   0.12
@@ -319,52 +319,63 @@ int main(int argc, char **argv)
     fprintf(stderr, "built without libiio: use -f FILE\n");
     rc = 2;
 #else
-    struct iio_context *ctx = iio_create_context_from_uri(uri);
-    if (!ctx) {
+    struct iio_context *ctx = iio_create_context(NULL, uri);
+    if (iio_err(ctx)) {
         fprintf(stderr, "cannot open libiio context %s\n", uri);
         return 1;
     }
-    struct iio_device *dev = iio_context_find_device(ctx, devname);
-    struct iio_device *phy = iio_context_find_device(ctx, "ad9361-phy");
+    const struct iio_device *dev = iio_context_find_device(ctx, devname);
+    const struct iio_device *phy = iio_context_find_device(ctx, "ad9361-phy");
     if (!dev) {
         fprintf(stderr, "device %s not found\n", devname);
         iio_context_destroy(ctx);
         return 1;
     }
-    struct iio_channel *ch0 = iio_device_find_channel(dev, "voltage0", false);
-    struct iio_channel *ch1 = iio_device_find_channel(dev, "voltage1", false);
+    const struct iio_channel *ch0 = iio_device_find_channel(dev, "voltage0", false);
+    const struct iio_channel *ch1 = iio_device_find_channel(dev, "voltage1", false);
+    struct iio_buffer *buf = iio_device_get_buffer(dev, 0);
+    struct iio_channels_mask *mask = iio_create_channels_mask(iio_device_get_channels_count(dev));
     if (!ch0 || !ch1) {
         fprintf(stderr, "RX channels voltage0/voltage1 not found\n");
-        iio_context_destroy(ctx);
-        return 1;
-    }
-    iio_channel_enable(ch0);
-    iio_channel_enable(ch1);
-    struct iio_buffer *buf = iio_device_create_buffer(dev, n, false);
-    if (!buf) {
+        rc = 1;
+    } else if (!buf || !mask) {
         fprintf(stderr, "cannot create a %zu sample buffer\n", n);
-        iio_context_destroy(ctx);
-        return 1;
+        rc = 1;
+    } else {
+        iio_channel_enable(ch0, mask);
+        iio_channel_enable(ch1, mask);
     }
 
-    while (running) {
+    while (rc == 0 && running) {
         long long rate = 0;
         if (fs <= 0 && phy) {
-            struct iio_channel *pc = iio_device_find_channel(phy, "voltage0", false);
-            if (pc && iio_channel_attr_read_longlong(pc, "sampling_frequency", &rate) == 0)
+            const struct iio_channel *pc = iio_device_find_channel(phy, "voltage0", false);
+            const struct iio_attr *pa = pc ? iio_channel_find_attr(pc, "sampling_frequency") : NULL;
+            if (pa && iio_attr_read_longlong(pa, &rate) == 0)
                 fs = (double)rate;
         }
-        ssize_t bytes = iio_buffer_refill(buf);
-        if (bytes < 0) {
-            fprintf(stderr, "buffer refill failed: %zd\n", bytes);
+        /* one stream per capture: a stream keeps queueing blocks, so after
+         * the sleep below it would return stale samples */
+        struct iio_stream *stream = iio_buffer_create_stream(buf, 2, n, mask);
+        if (iio_err(stream)) {
+            fprintf(stderr, "cannot create a %zu sample stream\n", n);
             rc = 1;
             break;
         }
-        const int16_t *p = (const int16_t *)iio_buffer_first(buf, ch0);
-        size_t got = (size_t)((const char *)iio_buffer_end(buf) - (const char *)p) / iio_buffer_step(buf);
+        const struct iio_block *blk = iio_stream_get_next_block(stream);
+        if (iio_err(blk)) {
+            fprintf(stderr, "buffer refill failed: %d\n", iio_err(blk));
+            iio_stream_destroy(stream);
+            rc = 1;
+            break;
+        }
+        const int16_t *p = (const int16_t *)iio_block_first(blk, ch0);
+        size_t got = (size_t)((const char *)iio_block_end(blk) - (const char *)p) /
+                     (2 * sizeof(int16_t));
         if (got > n)
             got = n;
         int16_to_float(p, x, got);
+        iio_stream_destroy(stream);
         detect(x, got, nsym, &w, &best, &top);
         report(&best, &top, fs, got, mqtt);
         if (!loop)
@@ -372,7 +383,8 @@ int main(int argc, char **argv)
         struct timespec ts = { (time_t)interval, (long)((interval - (long)interval) * 1e9) };
         nanosleep(&ts, NULL);
     }
-    iio_buffer_destroy(buf);
+    if (mask)
+        iio_channels_mask_destroy(mask);
     iio_context_destroy(ctx);
 #endif
     work_free(&w);
