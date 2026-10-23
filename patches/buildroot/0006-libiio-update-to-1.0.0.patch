@@ -10,6 +10,9 @@ binaries keep working.
 - WITH_TESTS now means unit tests, the tools are WITH_UTILS
 - the python bindings are no longer a cmake option, drop them and
   their patch
+- LOG_LEVEL=Warning: the default (Info) makes the compatibility layer
+  print a banner on stdout when a 0.x program starts, which corrupts
+  programs that write data or JSON on stdout
 
 diff --git a/package/libiio/0001-bindings-python-fix-library-loading.patch b/a/package/libiio/0001-bindings-python-fix-library-loading.patch
 deleted file mode 100644
@@ -103,7 +106,7 @@ diff --git a/package/libiio/libiio.mk b/package/libiio/libiio.mk
 index b275325..fff8f0e 100644
 --- a/package/libiio/libiio.mk
 +++ b/package/libiio/libiio.mk
-@@ -4,18 +4,22 @@
+@@ -4,18 +4,23 @@
  #
  ################################################################################
  
@@ -125,11 +128,12 @@ index b275325..fff8f0e 100644
 +	-DWITH_ZSTD=ON \
 +	-DWITH_MAN=OFF \
 +	-DLIBIIO_COMPAT=ON \
-+	-DWITH_IIOD_V0_COMPAT=ON
++	-DWITH_IIOD_V0_COMPAT=ON \
++	-DLOG_LEVEL=Warning
  
  ifeq ($(BR2_TOOLCHAIN_HAS_THREADS),y)
  LIBIIO_CONF_OPTS += -DNO_THREADS=OFF
-@@ -72,15 +76,6 @@ else
+@@ -72,15 +77,6 @@ else
  LIBIIO_CONF_OPTS += -DHAVE_DNS_SD=OFF
  endif
  
