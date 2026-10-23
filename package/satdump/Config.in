@@ -2,6 +2,7 @@ config BR2_PACKAGE_SATDUMP
 	bool "satdump"
 	select BR2_PACKAGE_VOLK
 	select BR2_PACKAGE_NANOMSG
+	select BR2_PACKAGE_LIBIIO0
 	help
 	  Satdump
 	  github (release)

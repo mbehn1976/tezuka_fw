@@ -15,20 +15,26 @@ PLUTO_STREAM_LICENSE = GPL-2.0+
 
 # Runtime & build dependencies
 # (adjust names to match what is actually available in your Buildroot tree)
-PLUTO_STREAM_DEPENDENCIES = libiio mosquitto libgse ne10 libwebsockets libopenssl
+# uses the libiio 0.x API: built against the private libiio 0.26
+PLUTO_STREAM_DEPENDENCIES = libiio0 mosquitto libgse ne10 libwebsockets libopenssl
+
+# The upstream Makefile ignores CFLAGS and LDFLAGS, so the paths of libiio 0.26
+# go with the compiler
+PLUTO_STREAM_LIBIIO0_FLAGS = -I$(LIBIIO0_INCLUDEDIR) \
+	-L$(STAGING_DIR)$(LIBIIO0_PREFIX)/lib $(LIBIIO0_RPATH)
 
 # ---- Generic-package build steps ------------------------------------------
 
 define PLUTO_STREAM_BUILD_CMDS
 	$(MAKE) -C $(@D) \
-		CC="$(TARGET_CC)" \
-		CXX="$(TARGET_CXX)" \
+		CC="$(TARGET_CC) $(PLUTO_STREAM_LIBIIO0_FLAGS)" \
+		CXX="$(TARGET_CXX) $(PLUTO_STREAM_LIBIIO0_FLAGS)" \
 		CFLAGS="$(TARGET_CFLAGS)" \
 		CXXFLAGS="$(TARGET_CXXFLAGS)" \
 		LDFLAGS="$(TARGET_LDFLAGS)" \
 		all
 	$(MAKE) -C $(@D)/obsctrl \
-		CXX="$(TARGET_CXX)" \
+		CXX="$(TARGET_CXX) $(PLUTO_STREAM_LIBIIO0_FLAGS)" \
 		CXXFLAGS="$(TARGET_CXXFLAGS)" \
 		LDFLAGS="$(TARGET_LDFLAGS)"
 endef
