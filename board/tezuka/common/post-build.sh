@@ -5,6 +5,12 @@ BOARD_DIR="$(dirname "$0")"
 
 grep -q mtd2 "${TARGET_DIR}/etc/fstab" || echo "mtd2 /mnt/jffs2 jffs2 rw,noatime 0 0" >> "${TARGET_DIR}/etc/fstab"
 
+# plutotx is a prebuilt program for the libiio 0.x API: let it find the private
+# libiio 0.26 (package libiio0) instead of the 0.x compatibility layer of libiio 1.0
+if [ -d "${TARGET_DIR}/usr/libiio0/lib" ] && [ -f "${TARGET_DIR}/root/plutotx" ]; then
+	"${HOST_DIR}/bin/patchelf" --set-rpath /usr/libiio0/lib "${TARGET_DIR}/root/plutotx"
+fi
+
 # Prepare LICENSE.html
 if [ ! -e "${BINARIES_DIR}/msd" ]; then
 	mkdir "${BINARIES_DIR}/msd"

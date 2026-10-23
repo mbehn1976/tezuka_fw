@@ -1,6 +1,7 @@
 config BR2_PACKAGE_LIBAD9361_IIO
 	bool "libad9361-iio"
-	depends on BR2_PACKAGE_LIBIIO
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_LIBIIO0
 	help
 	  AD9361 IIO helper library: fast-lock profile management,
 	  baseband rate / FIR filter setup, and other convenience
