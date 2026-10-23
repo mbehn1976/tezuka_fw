@@ -1,0 +1,40 @@
+diff --git a/package/libiio/0001-local-mmap-use-64-bit-popcount-and-ffs.patch b/package/libiio/0001-local-mmap-use-64-bit-popcount-and-ffs.patch
+new file mode 100644
+index 0000000..fcccee5
+--- /dev/null
++++ b/package/libiio/0001-local-mmap-use-64-bit-popcount-and-ffs.patch
+@@ -0,0 +1,34 @@
++From: Mario Behn <mario.behn@gmail.com>
++Subject: [PATCH] local-mmap: use the 64-bit popcount and ffs for the block mask
++
++The block mask is 64 bits wide, but __builtin_popcountl and __builtin_ffsl
++take a long, which is 32 bits on ARM. After 32 blocks the popcount of the
++truncated mask no longer matches the number of blocks, the code takes the
++"reuse a freed block" branch and ffsl returns 0, so creating the 34th block
++fails with -EINVAL and a stream cannot have more than 33 blocks on a 32-bit
++host. The kernel allows 64 blocks.
++
++Signed-off-by: Mario Behn <mario.behn@gmail.com>
++---
++diff --git a/local-mmap.c b/local-mmap.c
++index e52324e..cc2775f 100644
++--- a/local-mmap.c
+++++ b/local-mmap.c
++@@ -102,7 +102,7 @@ struct iio_block_pdata *local_create_mmap_block(
++ 		goto out_free_priv;
++ 	}
++ 
++-	if (__builtin_popcountl(ppdata->mmap_block_mask) == (int)ppdata->nb_blocks) {
+++	if (__builtin_popcountll(ppdata->mmap_block_mask) == (int)ppdata->nb_blocks) {
++ 		/* All our allocated blocks are used; we need to create one more. */
++ 		priv->idx = ppdata->nb_blocks;
++ 		req.id = 0;
++@@ -120,7 +120,7 @@ struct iio_block_pdata *local_create_mmap_block(
++ 		 * reuse it now. */
++ 
++ 		/* XXX: This only works if the blocks are the same size... */
++-		priv->idx = __builtin_ffsl(~ppdata->mmap_block_mask) - 1;
+++		priv->idx = __builtin_ffsll(~ppdata->mmap_block_mask) - 1;
++ 	}
++ 
++ 	priv->block.id = priv->idx;
