@@ -532,7 +532,7 @@ function ComplexIqPage({ d }) {
       const patchResp = await fetch('/api/raw-capture', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state_change: 'start' }),
+        body: JSON.stringify({ state_change: 'Start' }),
       });
       if (!patchResp.ok) throw new Error(`start failed: HTTP ${patchResp.status}`);
       let finished = false;
