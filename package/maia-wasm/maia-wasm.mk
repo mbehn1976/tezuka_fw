@@ -5,8 +5,8 @@
 ################################################################################
 
 # Must match MAIA_HTTPD_VERSION -- both live in the same monorepo
-MAIA_WASM_VERSION = 2637b59891bdfe38d8c5bf52c84984b3da68064e
-MAIA_WASM_SITE = https://github.com/F5OEO/maia-sdr/archive
+MAIA_WASM_VERSION = c58c2191fdea4ab60eca0466547de86c834150a3
+MAIA_WASM_SITE = https://github.com/mbehn1976/maia-sdr/archive
 MAIA_WASM_SOURCE = $(MAIA_WASM_VERSION).tar.gz
 MAIA_WASM_DEPENDENCIES = rust-wasm wasm-pack
 

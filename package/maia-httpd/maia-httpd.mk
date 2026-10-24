@@ -4,9 +4,9 @@
 #
 ################################################################################
 
-# Branch: sweep (pinned 2026-03-21)
-MAIA_HTTPD_VERSION = 2637b59891bdfe38d8c5bf52c84984b3da68064e
-MAIA_HTTPD_SITE = https://github.com/F5OEO/maia-sdr/archive
+# Branch: feature/spectrometer-raw-complex-capture (mbehn1976 fork, PR #12 head)
+MAIA_HTTPD_VERSION = c58c2191fdea4ab60eca0466547de86c834150a3
+MAIA_HTTPD_SITE = https://github.com/mbehn1976/maia-sdr/archive
 MAIA_HTTPD_SOURCE = $(MAIA_HTTPD_VERSION).tar.gz
 MAIA_HTTPD_DEPENDENCIES = host-openssl
 
