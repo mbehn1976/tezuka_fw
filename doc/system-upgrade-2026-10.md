@@ -11,7 +11,7 @@ compiled and was not run on hardware.
 |---|---|---|---|
 | Buildroot | 2026.05.2 | 2026.08.1 (rust-wasm pin 1.96.1 to 1.97.1) | 047922e |
 | ADI kernel pin | bf1d49f | b486fe8 (K1, still 6.12.77) | f802a0e |
-| Kernel (Pluto, Pluto+) | 6.12.77 | 6.12.114 (K2), tarball from the fork mbehn1976/linux, branch `tezuka/6.12.114-xlnx-2026r1` (a73a1562) | 3951671 |
+| Kernel (Pluto, Pluto+) | 6.12.77 | 6.12.114 (K2), tarball from the fork mbehn1976/linux, branch `tezuka/6.12.114-xlnx-2026r1` (678c4de70fdf, includes the DAC data select fix) | 3951671 and the pin bump |
 | libiio | 0.26 | 1.0.0 (library, iiod, tools) | 86d3fc2, c5666ad, dd49599 |
 | Programs using the libiio API | 0.x API | `cpdetect`, `zynqrx`, `pluto_rx`, `iio_ws_proxy` ported to 1.0 | dd1270a, a244b51, 2db939e, 293cd3a |
 | Programs that stay on 0.26 | n/a | `libad9361-iio`, SoapyPlutoSDR, kalibrate, the prebuilt `/root/plutotx`, and on the other boards `satdump`, `sdr_usb_gadget`, `pluto_stream`, built against the private package `libiio0` | 8d789d6, a298435 |
@@ -28,7 +28,7 @@ boards keep the ADI K1 pin and the patch directory.
   (version, hash, zstd, `WITH_UTILS`, `LIBIIO_COMPAT=ON`, `WITH_IIOD_V0_COMPAT=ON`,
   `LOG_LEVEL=Warning`) and `0007` (64-bit popcount/ffs on 32-bit ARM, see below).
 * Kernel: the Pluto and Pluto+ defconfigs pin the tarball of the fork branch above (ADI
-  `b486fe8` merged with kernel.org v6.12.114, 18 merge conflicts, plus the 6 Tezuka patches applied in tree).
+  `b486fe8` merged with kernel.org v6.12.114, 18 merge conflicts, plus the 6 Tezuka patches and the DAC fix applied in tree).
 * `libiio0`: a second, real libiio 0.26 installed in `/usr/libiio0/lib`; consumers link it with an
   rpath (the toolchain emits DT_RPATH, not RUNPATH). The prebuilt `plutotx` gets its rpath from
   `patchelf` in `board/tezuka/common/post-build.sh`.
@@ -106,24 +106,31 @@ Boards: original Pluto (Z7010 Rev.B, flashed from the `.frm`, ejected by the use
   through the API: 262144 samples).
 * U-Boot (no UART console), and F5OEO's reaction (no reply on any PR as of 2026-10-22).
 
-## Finding: TX keeps transmitting after the writer stops (not caused by this upgrade)
+## Finding and fix: TX kept transmitting after the writer stopped
 
-After the last writer stops, the DAC keeps replaying the last DMA data, so a tone stays at the
-receiver (58 to 66 dB) until the TX gain is lowered. The same happens on the pre-upgrade images
-`combined-newdash10` (kernel 6.12.77, libiio 0.26) and `k2-newdash13` (6.12.114, libiio 0.26).
+Before the fix, after the last writer stopped, the DAC kept replaying the last DMA data, so a tone
+stayed at the receiver (58 to 66 dB) until the TX gain was lowered. It happened on the
+pre-upgrade images `combined-newdash10` (kernel 6.12.77, libiio 0.26) as well, so it is not caused
+by this upgrade.
 
-Cause: the ADI driver `cf_axi_dds.c` (`cf_axi_dds_update_scan_mode`) sets the AXI DAC data
-select to DMA when the TX buffer is enabled, and nothing sets it back to DDS when the buffer is
-disabled (`dds_buffer_postdisable` in `cf_axi_dds_buffer_stream.c` only clears the DMA enable). In
-debugfs, `iio:device2` registers `0x0418` and `0x0458` (CHAN_CNTRL_7) stay at `0x2`. Writing 0 to
-both silences the tone:
+Cause: the AXI DAC data select (`CHAN_CNTRL_7`, debugfs `iio:device2` registers `0x0418` and
+`0x0458`) is switched to DMA (`0x2`) when a TX buffer is enabled and has to go back to DDS (`0x0`)
+when it is disabled. `cf_axi_dds_buffer_stream.c` has the code for that (`dds_buffer_postdisable`
+calls `cf_axi_dds_datasel(st, -1, DATA_SEL_DDS)`), but ADI commit 331f56730c62 ("iio: buffer-dma:
+sync write support with upstream", December 2023) moved the buffer setup to
+`devm_iio_dmaengine_buffer_setup_with_ops()` and dropped the line
+`indio_dev->setup_ops = &dds_buffer_setup_ops;`. Since then the preenable and postdisable
+callbacks never run.
 
-    echo "0x0418 0" > /sys/kernel/debug/iio/iio:device2/direct_reg_access
-    echo "0x0458 0" > /sys/kernel/debug/iio/iio:device2/direct_reg_access
+Fix: assign `indio_dev->setup_ops` again in `cf_axi_dds_configure_buffer()`. Commit
+`678c4de70fdf` on the kernel fork branch `tezuka/6.12.114-xlnx-2026r1`, which the Pluto and Pluto+
+defconfigs now pin. Other boards use the ADI K1 pin and do not have the fix.
 
-Writing the DDS scale through sysfs does not help. A kernel patch (select DDS in `postdisable`)
-is the proper fix; it is not applied. Consequence for tests: an "after stop" or "no TX" baseline is
-only valid once the TX gain is restored.
+Checked on hardware: Pluto and Pluto+, tone while writing 63 to 73 dB, after the writer stops the
+data select reads `0x0` and only the LO leakage (32 to 47 dB) remains, on two start/stop cycles.
+Manual workaround on an unfixed kernel: write 0 to both registers through
+`/sys/kernel/debug/iio/iio:device2/direct_reg_access` (`echo "0x0418 0" > ...`); writing the DDS
+scale through sysfs does not help. Not reported to ADI.
 
 ## Branches on the fork (mbehn1976/tezuka_fw)
 
@@ -135,7 +142,7 @@ only valid once the TX gain is restored.
   PR 504 device-tree nodes, `cpdetect`, and the independent fix PRs).
 * `backup/*`: older local branches and snapshots of two worktrees with uncommitted changes
   (`backup/wip-tezuka_fw-2026-10-24`, `backup/wip-f1f4-2026-10-24`).
-* Kernel: fork `mbehn1976/linux`, branch `tezuka/6.12.114-xlnx-2026r1`.
+* Kernel: fork `mbehn1976/linux`, branch `tezuka/6.12.114-xlnx-2026r1` (678c4de70fdf: ADI b486fe8 merged with v6.12.114, the 6 Tezuka patches, the DAC fix).
 
 Upstream proposals are a separate decision: the Buildroot patch, the kernel tarball and the
 application ports could become small PRs to F5OEO, in this order, only after asking.
