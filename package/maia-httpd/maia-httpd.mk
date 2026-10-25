@@ -4,9 +4,10 @@
 #
 ################################################################################
 
-# Branch: sweep (pinned 2026-03-21)
-MAIA_HTTPD_VERSION = 2637b59891bdfe38d8c5bf52c84984b3da68064e
-MAIA_HTTPD_SITE = https://github.com/F5OEO/maia-sdr/archive
+# mbehn1976/maia-sdr test/orig-into-refactor-pr12: F5OEO main + PR 12 complex spectrometer,
+# the Tezuka DDC routing toggle and waterfall UI are already in that tree (no package patches)
+MAIA_HTTPD_VERSION = 415cea9c87c68646cb7f588c58f110c42a610097
+MAIA_HTTPD_SITE = https://github.com/mbehn1976/maia-sdr/archive
 MAIA_HTTPD_SOURCE = $(MAIA_HTTPD_VERSION).tar.gz
 MAIA_HTTPD_DEPENDENCIES = host-openssl
 
