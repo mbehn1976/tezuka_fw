@@ -246,3 +246,103 @@ Not done: an RT image on the original Pluto, USB gadget streaming, long soak.
   this config only builds on a machine that has it). It is not listed in `boards.json`. Build: `source sourceme.first; make -C buildroot O=$PWD/output/plutoplus_rt plutoplus_rt_defconfig; make -C buildroot O=$PWD/output/plutoplus_rt -j16`
   (if the post-image fails on `system_top.bit`: `board-fpga-dirclean board-fpga`, then `make` again). Add `board/tezuka/plutoplus/kernel/fragment/trace.config` to the fragment list for the ftrace diagnostic image.
 - Images used in this document: `known_good/sdimg-rt21` (RT), `known_good/sdimg-rt21-trace` (RT with tracers), `known_good/sdimg-fresh-g32c3` (non-RT reference and rollback).
+
+## 14. Soak comparison RT against non-RT (2026-10-25, hardware-measured)
+
+Same script on both kernels (Pluto+ under test, Pluto non-RT as the link partner): 15 minutes of 5 s Ethernet streaming runs at 10 MS/s (53 iterations; `cyclictest -p98 -a0` and `stress-ng` on core 0 on the board;
+block-phase outlier check on the received tone), then 6 minutes of repeated `rf_iq_check.py --fs 2500000` (Pluto RX, the check that failed once in the suite). A power glitch in the room reset both boards during the first
+non-RT attempt (void; the Pluto came up in the U-Boot USB download gadget and needed a power cycle); the numbers below are from the repeat.
+
+| | Non-RT 6.12.114 (`g32c3`) | RT 6.12.114-rt21 |
+|---|---|---|
+| Iterations, incomplete reads | 53, 0 | 53, 0 |
+| Worst `cyclictest` max, core 0 | 10084 us | 551 us (9 iterations above 200 us) |
+| Phase-step outliers (>0.4 rad), total | 6 | 21 (17 of 53 iterations) |
+| CW-check repeat (`cw 205000 Hz`, 6 runs) | 6 ok, 0 FAIL | 5 ok, 1 FAIL |
+| Full suite | 70 ok, 0 FAIL (gb6c3, same sources) | 69 ok, 1 FAIL (the same check) |
+
+Reading: PREEMPT_RT lowers the worst-case latency about 18 times but, in this test, goes with more tone discontinuities and the only CW-check failures seen so far (two, both on the RT image, none on non-RT in 6 + 70 runs).
+The samples are small and the outliers are not yet shown to be dropped DMA buffers, so this is a lead, not a verdict. Next: find where the outliers sit (buffer boundaries of 262144 samples would point at dropped blocks),
+check the iiod/DMA ring behaviour under RT (kernel buffer count, block size), and repeat with more runs and with `cyclictest` stopped (to rule out the test load itself).
+
+### 14b. Where the outliers sit (RT image, 2026-10-25, hardware-measured)
+
+Same setup as above (Ethernet 10 MS/s, `iio_readdev -b 262144`, `cyclictest -p98 -a0` and `stress-ng` on core 0), 50 loaded iterations of 5 s, outlier = block-phase step above 0.4 rad.
+Result: 10 outliers in 50 iterations (8 or 9 iterations affected; an earlier run of 12 loaded plus 8 unloaded iterations had 0), and all 10 sit exactly on a multiple of 262144 samples (distance 0 in every case;
+for example sample 42729472 = 163 x 262144, 2097152 = 8 x 262144, seen twice). The step sizes vary (-2.47 to 3.1 rad), which fits one to a few whole buffers missing (not verified, the data was not kept).
+Conclusion: the outliers are whole buffers lost or damaged, not a TX glitch or drift. Rate: RT 21 of 53 iterations (first soak) and 10 of 50 (this run), non-RT 6 of 53 (location not recorded).
+Earlier local (on-board) 10 MS/s tests under load had 3 outliers on RT and 0 on non-RT, so the loss is not specific to the Ethernet path. Not yet separated: the effect of the test load itself
+(`cyclictest` wakes 4000 times per second at priority 98 on the core that also runs the network interrupt threads, `stress-ng` on the same core) from the effect of the RT kernel.
+
+### 14c. Three-way test: which load causes the lost buffers (RT image, 2026-10-25, hardware-measured)
+
+Ethernet 10 MS/s, 25 iterations of 5 s per case, same outlier check; script `outlier_3way.py` (scratchpad). All outliers sit exactly on 262144-sample boundaries.
+
+| Load on core 0 | Outliers in 25 iterations |
+|---|---|
+| none | 2 |
+| `stress-ng` only | 4 |
+| `cyclictest -p98 -i250` only | 7 |
+| both (50-iteration run above) | 10 in 50 |
+
+Reading: buffers are also lost with no test load at all (2 of 25), so the load is not the whole cause; `cyclictest` raises the rate the most. The counts are small, and the same three cases have not yet been run on the non-RT kernel
+(the only non-RT figure is 6 outliers in 53 iterations with both loads), so it is still open whether RT loses more than non-RT. Next: the same three cases on `g32c3`, then the kernel/iiod side (block count of the iiod kernel buffer, `iiod -n 3`,
+DMA ring depth, whether the host-side `iio_readdev -b 262144` with libiio 1.0 uses few blocks) to see where a buffer can be dropped.
+
+### 14d. Same three cases on the non-RT kernel (2026-10-25, hardware-measured) and what it means
+
+Non-RT `g32c3`, Ethernet 10 MS/s, 25 iterations of 5 s per case, same check; all 11 outliers again sit exactly on 262144-sample boundaries.
+
+| Load on core 0 | Non-RT outliers | RT outliers |
+|---|---|---|
+| none | 3 | 2 |
+| `stress-ng` only | 5 | 4 |
+| `cyclictest` only | 3 | 7 |
+| Total of 75 iterations | 11 | 13 |
+
+So the lost buffers are NOT caused by PREEMPT_RT: both kernels lose about one 262144-sample buffer in roughly one 5 s run out of seven, with or without test load. The soak counts (RT 21 of 53, non-RT 6 of 53) differ more than these
+75-run totals do; with the small samples I treat RT as not worse until a longer run says otherwise. CORRECTION of earlier statements in sections 9 and 10 and in the first report: "0 dropped buffers at 10 MS/s over Ethernet" was based on four 5 s runs and is wrong.
+10 MS/s over Ethernet is about 40 MB/s, close to the measured ceiling of about 50 MB/s (continuous only at 2.5 MS/s and below in this document's runs), so occasional whole-buffer drops there are what the earlier ceiling
+measurement predicts. Next, to confirm: repeat the check at 5 MS/s and 7.5 MS/s (expected clean) and look at the iiod/TCP side (`iiod -n 3`, socket buffers).
+
+### 14e. Rate dependence (RT image, Ethernet, no extra load, 30 iterations of 5 s per rate, 2026-10-25, hardware-measured)
+
+| Rate | Outliers in 30 iterations | On a 262144-sample boundary |
+|---|---|---|
+| 5 MS/s | 2 | 2 |
+| 7.5 MS/s | 5 | 5 |
+| 10 MS/s | 2 | 2 |
+
+The loss rate does not rise with the data rate between 5 and 10 MS/s (about 20 MB/s to 40 MB/s), so the "close to the Ethernet ceiling" explanation in 14d is NOT supported; treat that sentence as refuted.
+Whole-buffer losses occur at 5 MS/s too, on both kernels. Candidates not yet tested: the host side (libiio 0.26 `iio_readdev`, NIC), iiod/TCP, the kernel DMA block queue (a block not requeued in time), the transport itself.
+Discriminating test: the same 5 MS/s check over USB (`192.168.4.1`) and on the board itself (`iio_readdev -u local:` into tmpfs), 30 iterations each, then a libiio 1.0 host client.
+
+### 14f. Transport comparison and the pre-upgrade firmware (2026-10-25, hardware-measured)
+
+Pluto+ at 5 MS/s, 30 iterations of 5 s, no extra load, Pluto non-RT as the TX partner, outlier check as above (every outlier sits on a 262144-sample boundary in all cases).
+
+| Firmware on the Pluto+, client, transport | Outliers (iterations) |
+|---|---|
+| RT 6.12.114-rt21, iiod 1.0.0, libiio 0.26 client, USB (192.168.4.1) | 106 (30) |
+| RT, board-local `iio_readdev -u local:` into tmpfs | 0 (30) |
+| RT, libiio 1.0.0 client (`iio_rwdev`, host build of the same release), Ethernet | 0 (30) |
+| RT, libiio 0.26 client, Ethernet | 4 (30) |
+| Pre-upgrade `sdimg-k2-newdash13` (6.12.114 non-RT, iiod 0.26), 0.26 client, Ethernet | 0 (30) |
+| Same pre-upgrade firmware, 0.26 client, USB | 96 (30) |
+| Same pre-upgrade firmware, 0.26 client, Ethernet, 10 MS/s | 14 outliers in 8 of 40 iterations |
+
+Reading: the kernel/DMA/iiod-independent local path is clean, so the receiver chain on the board is not dropping data. Over the network the host/iiod path with the 0.26 client loses whole 262144-sample buffers on every firmware tried,
+including the pre-upgrade one (about one 5 s run in five at 10 MS/s), so this is NOT a regression of the libiio 1.0 upgrade and NOT caused by PREEMPT_RT. USB is much worse and equally bad before and after the upgrade. The libiio 1.0 client was clean in 30 runs at 5 MS/s;
+it has not yet been run at 10 MS/s. The earlier statements in this document that Ethernet at 10 MS/s is drop-free are wrong (sections 9, 10, 11); the measured ceiling note in memory (continuous at 2.5 and 10 MS/s) came from short runs.
+Host used: libiio 0.26 tools from the distribution, libiio 1.0.0 tools built from the Buildroot-downloaded `libiio-1.0.0.tar.gz` into the scratchpad.
+
+### 14g. libiio 1.0 client against the 0.26 client at 10 MS/s (RT image, Ethernet, no extra load, 40 iterations of 5 s each, 2026-10-25, hardware-measured)
+
+| Client | Outliers (all on a 262144-sample boundary) |
+|---|---|
+| libiio 1.0.0 `iio_rwdev` (host build) | 4 |
+| libiio 0.26 `iio_readdev` | 6 |
+
+The 1.0 client, clean in 30 runs at 5 MS/s, loses buffers at 10 MS/s as well, at a rate like the 0.26 client. So the loss is not a property of the 0.x protocol or of the client version. What is established: the on-board path is clean (0 of 30 at 5 MS/s);
+over Ethernet both client versions lose whole 262144-sample buffers at 10 MS/s (about one 5 s run in seven to ten), with RT and non-RT kernels and also with the pre-upgrade firmware; USB loses far more at 5 MS/s. Likely mechanism, not proven: a brief stall of the network consumer
+(TCP, host or iiod thread) lets the kernel DMA buffer queue overrun, which drops whole blocks. Candidate fixes to test: more kernel buffers in iiod/the client (block count), larger socket buffers, a larger transfer size.
