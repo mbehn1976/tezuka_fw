@@ -50,10 +50,25 @@ The kernel move brings the stable releases 6.12.78 to 6.12.114.
 
 ## Tested
 
-Hardware: original Pluto (flashed from the .frm) and Pluto+ (SD boot), cabled RF link. These runs were done on my
-combined test branch; this branch has the same files except my other, unmerged features (the cpdetect defconfig enable, an
-unrelated provenance change in post-build.sh), which I checked by diffing the trees. It has not been built or run as a
-branch of its own. I can do that before you merge.
+Hardware: original Pluto (flashed from the .frm) and Pluto+ (SD boot), cabled RF link. The full RF suite and the
+long tests below were run on my combined test branch; this branch has the same files except my other, unmerged
+features (the cpdetect defconfig enable, an unrelated provenance change in post-build.sh), which I checked by
+diffing the trees.
+
+This branch was also built and run on its own, with the cpdetect defconfig enable on top (proposal/system-upgrade
+plus one commit), from a clean build on both boards (build-verified, then hardware-checked):
+
+* Both boards boot it: kernel 6.12.114, libiio 1.0.0, iiod and maia-httpd running, no new dmesg lines.
+* TX tone fix, Pluto TX to Pluto+ RX: tone 73 dB with the data select on DMA while writing; after the writer stops the data
+  select is back to 0 and only LO leakage (46 to 47 dB) remains, two start/stop cycles. Pluto+ TX to Pluto RX: tone 62 to 63 dB,
+  after stop 32 dB, data select 0.
+* The first boot of the Pluto after flashing this build stopped in U-Boot (USB download gadget) and needed a power cycle;
+  the next boot was normal. Not reproduced on later flashes of other builds, cause not found.
+* The full RF suite could NOT be run on this branch: the suite uses the /iq-waterfall websocket of the complex
+  spectrometer (maia-sdr PR 12), which F5OEO main does not have, so every section fails with HTTP 404 there. That is
+  a property of the test, not of the upgrade.
+
+Results from the combined branch:
 
 * Full RF suite (70 checks, 30 sections) on both boards after each step: Buildroot, kernel pin, kernel 6.12.114,
   libiio 1.0.0, DAC fix. 70 ok, 0 FAIL on the final images, settings restored 30/30. The kernel-pin-only step had one
