@@ -1,0 +1,113 @@
+From e82f39efa29de19356eb8e2033c1a9875a89adab Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Fri, 23 Oct 2026 22:51:00 +0200
+Subject: [PATCH 07/14] libiio: fix the 33 block limit on 32-bit and the stdout
+ banner
+
+Two problems found while porting pluto_rx to the 1.0 stream API:
+
+- local-mmap.c uses __builtin_popcountl and __builtin_ffsl on a 64-bit
+  block mask. On ARM long is 32 bits, so the 34th block of a stream fails
+  with EINVAL (the kernel allows 64). New patch 0007 uses the ll variants.
+- The 0.x compatibility layer prints a banner at INFO level on stdout
+  when a program starts, which corrupted the data of pluto_rx and the
+  JSON of cpdetect when they ran through the layer. Build libiio with
+  LOG_LEVEL=Warning (added to patch 0006).
+
+Tested on Pluto+: 64 blocks work and 65 are refused, the 0.x pluto_rx
+output is clean through the layer.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ .../0006-libiio-update-to-1.0.0.patch         | 10 +++--
+ ...0007-libiio-fix-block-mask-on-32-bit.patch | 40 +++++++++++++++++++
+ 2 files changed, 47 insertions(+), 3 deletions(-)
+ create mode 100644 patches/buildroot/0007-libiio-fix-block-mask-on-32-bit.patch
+
+diff --git a/patches/buildroot/0006-libiio-update-to-1.0.0.patch b/patches/buildroot/0006-libiio-update-to-1.0.0.patch
+index d2a3e81..b61c985 100644
+--- a/patches/buildroot/0006-libiio-update-to-1.0.0.patch
++++ b/patches/buildroot/0006-libiio-update-to-1.0.0.patch
+@@ -10,6 +10,9 @@ binaries keep working.
+ - WITH_TESTS now means unit tests, the tools are WITH_UTILS
+ - the python bindings are no longer a cmake option, drop them and
+   their patch
++- LOG_LEVEL=Warning: the default (Info) makes the compatibility layer
++  print a banner on stdout when a 0.x program starts, which corrupts
++  programs that write data or JSON on stdout
+ 
+ diff --git a/package/libiio/0001-bindings-python-fix-library-loading.patch b/a/package/libiio/0001-bindings-python-fix-library-loading.patch
+ deleted file mode 100644
+@@ -103,7 +106,7 @@ diff --git a/package/libiio/libiio.mk b/package/libiio/libiio.mk
+ index b275325..fff8f0e 100644
+ --- a/package/libiio/libiio.mk
+ +++ b/package/libiio/libiio.mk
+-@@ -4,18 +4,22 @@
++@@ -4,18 +4,23 @@
+  #
+  ################################################################################
+  
+@@ -125,11 +128,12 @@ index b275325..fff8f0e 100644
+ +	-DWITH_ZSTD=ON \
+ +	-DWITH_MAN=OFF \
+ +	-DLIBIIO_COMPAT=ON \
+-+	-DWITH_IIOD_V0_COMPAT=ON
+++	-DWITH_IIOD_V0_COMPAT=ON \
+++	-DLOG_LEVEL=Warning
+  
+  ifeq ($(BR2_TOOLCHAIN_HAS_THREADS),y)
+  LIBIIO_CONF_OPTS += -DNO_THREADS=OFF
+-@@ -72,15 +76,6 @@ else
++@@ -72,15 +77,6 @@ else
+  LIBIIO_CONF_OPTS += -DHAVE_DNS_SD=OFF
+  endif
+  
+diff --git a/patches/buildroot/0007-libiio-fix-block-mask-on-32-bit.patch b/patches/buildroot/0007-libiio-fix-block-mask-on-32-bit.patch
+new file mode 100644
+index 0000000..3d5d831
+--- /dev/null
++++ b/patches/buildroot/0007-libiio-fix-block-mask-on-32-bit.patch
+@@ -0,0 +1,40 @@
++diff --git a/package/libiio/0001-local-mmap-use-64-bit-popcount-and-ffs.patch b/package/libiio/0001-local-mmap-use-64-bit-popcount-and-ffs.patch
++new file mode 100644
++index 0000000..fcccee5
++--- /dev/null
+++++ b/package/libiio/0001-local-mmap-use-64-bit-popcount-and-ffs.patch
++@@ -0,0 +1,34 @@
+++From: Mario Behn <mario.behn@gmail.com>
+++Subject: [PATCH] local-mmap: use the 64-bit popcount and ffs for the block mask
+++
+++The block mask is 64 bits wide, but __builtin_popcountl and __builtin_ffsl
+++take a long, which is 32 bits on ARM. After 32 blocks the popcount of the
+++truncated mask no longer matches the number of blocks, the code takes the
+++"reuse a freed block" branch and ffsl returns 0, so creating the 34th block
+++fails with -EINVAL and a stream cannot have more than 33 blocks on a 32-bit
+++host. The kernel allows 64 blocks.
+++
+++Signed-off-by: Mario Behn <mario.behn@gmail.com>
+++---
+++diff --git a/local-mmap.c b/local-mmap.c
+++index e52324e..cc2775f 100644
+++--- a/local-mmap.c
++++++ b/local-mmap.c
+++@@ -102,7 +102,7 @@ struct iio_block_pdata *local_create_mmap_block(
+++ 		goto out_free_priv;
+++ 	}
+++ 
+++-	if (__builtin_popcountl(ppdata->mmap_block_mask) == (int)ppdata->nb_blocks) {
++++	if (__builtin_popcountll(ppdata->mmap_block_mask) == (int)ppdata->nb_blocks) {
+++ 		/* All our allocated blocks are used; we need to create one more. */
+++ 		priv->idx = ppdata->nb_blocks;
+++ 		req.id = 0;
+++@@ -120,7 +120,7 @@ struct iio_block_pdata *local_create_mmap_block(
+++ 		 * reuse it now. */
+++ 
+++ 		/* XXX: This only works if the blocks are the same size... */
+++-		priv->idx = __builtin_ffsl(~ppdata->mmap_block_mask) - 1;
++++		priv->idx = __builtin_ffsll(~ppdata->mmap_block_mask) - 1;
+++ 	}
+++ 
+++ 	priv->block.id = priv->idx;
+-- 
+2.53.0
+

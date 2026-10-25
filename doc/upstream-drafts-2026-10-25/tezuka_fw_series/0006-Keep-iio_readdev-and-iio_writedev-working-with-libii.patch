@@ -1,0 +1,51 @@
+From 7352e558a2e34441effa5052f62b2f56c0fb8ae1 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Fri, 23 Oct 2026 15:38:20 +0200
+Subject: [PATCH 06/14] Keep iio_readdev and iio_writedev working with libiio
+ 1.0
+
+libiio 1.0 merged both tools into iio_rwdev. Add small wrapper scripts with the old names so existing scripts keep working. iio_writedev runs iio_rwdev -w as a child so pidof and kill on the old name still work.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ .../common/overlay_tezuka/usr/bin/iio_readdev    |  4 ++++
+ .../common/overlay_tezuka/usr/bin/iio_writedev   | 16 ++++++++++++++++
+ 2 files changed, 20 insertions(+)
+ create mode 100755 board/tezuka/common/overlay_tezuka/usr/bin/iio_readdev
+ create mode 100755 board/tezuka/common/overlay_tezuka/usr/bin/iio_writedev
+
+diff --git a/board/tezuka/common/overlay_tezuka/usr/bin/iio_readdev b/board/tezuka/common/overlay_tezuka/usr/bin/iio_readdev
+new file mode 100755
+index 0000000..6013673
+--- /dev/null
++++ b/board/tezuka/common/overlay_tezuka/usr/bin/iio_readdev
+@@ -0,0 +1,4 @@
++#!/bin/sh
++# libiio 1.0 merged iio_readdev and iio_writedev into iio_rwdev; keep the old
++# name working for existing scripts.
++exec iio_rwdev "$@"
+diff --git a/board/tezuka/common/overlay_tezuka/usr/bin/iio_writedev b/board/tezuka/common/overlay_tezuka/usr/bin/iio_writedev
+new file mode 100755
+index 0000000..01c59c0
+--- /dev/null
++++ b/board/tezuka/common/overlay_tezuka/usr/bin/iio_writedev
+@@ -0,0 +1,16 @@
++#!/bin/sh
++# libiio 1.0 merged iio_readdev and iio_writedev into iio_rwdev; keep the old
++# name working for existing scripts. Run as a child so the process keeps this
++# name for pidof/kill, and stop the child when this script is stopped.
++# A background job gets /dev/null as stdin unless it is redirected explicitly,
++# so keep stdin on fd 3 and redirect from there.
++exec 3<&0
++iio_rwdev -w "$@" <&3 3<&- &
++child=$!
++exec 3<&-
++trap 'kill $child 2>/dev/null' TERM INT HUP
++wait $child
++status=$?
++# wait returns early when a trapped signal arrives; reap the child
++while kill -0 $child 2>/dev/null; do wait $child; status=$?; done
++exit $status
+-- 
+2.53.0
+

@@ -1,0 +1,49 @@
+From 678c4de70fdf40a490a574403537ced2e82cdba6 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Sat, 24 Oct 2026 22:37:47 +0200
+Subject: [PATCH] iio: cf_axi_dds: attach the buffer setup ops again
+
+ADI commit 331f56730c62 (iio: buffer-dma: sync write support with upstream)
+moved the buffer setup to devm_iio_dmaengine_buffer_setup_with_ops() and
+dropped the assignment of dds_buffer_setup_ops. Since then the preenable and
+postdisable callbacks never run, the data select of the AXI DAC stays on DMA
+after the last writer has stopped, and the DAC keeps replaying the last
+samples. Attach the ops after the buffer setup so that the DAC goes back to
+the DDS when the buffer is disabled.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ drivers/iio/frequency/cf_axi_dds_buffer_stream.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/iio/frequency/cf_axi_dds_buffer_stream.c b/drivers/iio/frequency/cf_axi_dds_buffer_stream.c
+index 7388f9a275e7..cf3d584284e3 100644
+--- a/drivers/iio/frequency/cf_axi_dds_buffer_stream.c
++++ b/drivers/iio/frequency/cf_axi_dds_buffer_stream.c
+@@ -99,9 +99,22 @@ static const struct iio_dma_buffer_ops dds_buffer_dma_buffer_ops = {
+ 
+ int cf_axi_dds_configure_buffer(struct iio_dev *indio_dev)
+ {
+-	return devm_iio_dmaengine_buffer_setup_with_ops(indio_dev->dev.parent,
++	int ret;
++
++	ret = devm_iio_dmaengine_buffer_setup_with_ops(indio_dev->dev.parent,
+ 						   indio_dev, "tx",
+ 						   IIO_BUFFER_DIRECTION_OUT,
+ 						   &dds_buffer_dma_buffer_ops, indio_dev);
++	if (ret)
++		return ret;
++
++	/*
++	 * Without these ops nothing switches the DAC back to the DDS when the
++	 * buffer is disabled: the data select stays on DMA and the DAC keeps
++	 * replaying the last samples after the writer has stopped.
++	 */
++	indio_dev->setup_ops = &dds_buffer_setup_ops;
++
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(cf_axi_dds_configure_buffer);
+-- 
+2.53.0
+

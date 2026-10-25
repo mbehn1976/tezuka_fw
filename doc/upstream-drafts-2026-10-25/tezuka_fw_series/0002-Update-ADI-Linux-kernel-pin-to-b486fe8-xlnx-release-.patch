@@ -1,0 +1,211 @@
+From ec92a3abfc694d20badf5d335be027dae0538cc3 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Fri, 23 Oct 2026 08:09:52 +0200
+Subject: [PATCH 02/14] Update ADI Linux kernel pin to b486fe8
+ (xlnx/release/v6.12.y-2026r1 tip)
+
+Still 6.12.77. Four commits ahead of bf1d49f, none in code used by the Zynq boards (m2k-dac, ad9088, arm64 dts).
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ configs/e200_maiasdr_defconfig          | 2 +-
+ configs/e310_maiasdr_defconfig          | 2 +-
+ configs/fishball_maiasdr_7020_defconfig | 2 +-
+ configs/fishball_maiasdr_defconfig      | 2 +-
+ configs/fishball_mini_7020_defconfig    | 2 +-
+ configs/fishball_mini_defconfig         | 2 +-
+ configs/libre_maiasdr_defconfig         | 2 +-
+ configs/nano_defconfig                  | 2 +-
+ configs/opensdrlab7010mini_defconfig    | 2 +-
+ configs/pciesdr7010_defconfig           | 2 +-
+ configs/pluto_maiasdr_defconfig         | 2 +-
+ configs/plutoplus_maiasdr_defconfig     | 2 +-
+ configs/plutoskyr2_defconfig            | 2 +-
+ configs/signalsdrpro_defconfig          | 2 +-
+ 14 files changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/configs/e200_maiasdr_defconfig b/configs/e200_maiasdr_defconfig
+index 1f6a02b..f347c88 100644
+--- a/configs/e200_maiasdr_defconfig
++++ b/configs/e200_maiasdr_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/e310_maiasdr_defconfig b/configs/e310_maiasdr_defconfig
+index a6edf0e..d300e85 100644
+--- a/configs/e310_maiasdr_defconfig
++++ b/configs/e310_maiasdr_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/fishball_maiasdr_7020_defconfig b/configs/fishball_maiasdr_7020_defconfig
+index 4cb500f..c7746c7 100644
+--- a/configs/fishball_maiasdr_7020_defconfig
++++ b/configs/fishball_maiasdr_7020_defconfig
+@@ -22,7 +22,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/fishball_maiasdr_defconfig b/configs/fishball_maiasdr_defconfig
+index 461a087..913da88 100644
+--- a/configs/fishball_maiasdr_defconfig
++++ b/configs/fishball_maiasdr_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/fishball_mini_7020_defconfig b/configs/fishball_mini_7020_defconfig
+index c23a4a4..10951b7 100644
+--- a/configs/fishball_mini_7020_defconfig
++++ b/configs/fishball_mini_7020_defconfig
+@@ -22,7 +22,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/fishball_mini_defconfig b/configs/fishball_mini_defconfig
+index 0befdc9..e053074 100644
+--- a/configs/fishball_mini_defconfig
++++ b/configs/fishball_mini_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/libre_maiasdr_defconfig b/configs/libre_maiasdr_defconfig
+index db383a2..009f07d 100644
+--- a/configs/libre_maiasdr_defconfig
++++ b/configs/libre_maiasdr_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/nano_defconfig b/configs/nano_defconfig
+index 3e2b31e..c460c31 100644
+--- a/configs/nano_defconfig
++++ b/configs/nano_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ #BR2_LINUX_KERNEL_DEFCONFIG="zynq_pluto"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+diff --git a/configs/opensdrlab7010mini_defconfig b/configs/opensdrlab7010mini_defconfig
+index 7c3daec..03f2b34 100644
+--- a/configs/opensdrlab7010mini_defconfig
++++ b/configs/opensdrlab7010mini_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/pciesdr7010_defconfig b/configs/pciesdr7010_defconfig
+index e47e793..67bd916 100644
+--- a/configs/pciesdr7010_defconfig
++++ b/configs/pciesdr7010_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/pluto_maiasdr_defconfig b/configs/pluto_maiasdr_defconfig
+index 19855a4..64a2be2 100644
+--- a/configs/pluto_maiasdr_defconfig
++++ b/configs/pluto_maiasdr_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/plutoplus_maiasdr_defconfig b/configs/plutoplus_maiasdr_defconfig
+index 915289f..928ea84 100644
+--- a/configs/plutoplus_maiasdr_defconfig
++++ b/configs/plutoplus_maiasdr_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/plutoskyr2_defconfig b/configs/plutoskyr2_defconfig
+index 11c5869..fad51f3 100644
+--- a/configs/plutoskyr2_defconfig
++++ b/configs/plutoskyr2_defconfig
+@@ -22,7 +22,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+diff --git a/configs/signalsdrpro_defconfig b/configs/signalsdrpro_defconfig
+index 7fdbbe1..ec374a6 100644
+--- a/configs/signalsdrpro_defconfig
++++ b/configs/signalsdrpro_defconfig
+@@ -24,7 +24,7 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
+ BR2_LINUX_KERNEL=y
+ BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/bf1d49f17fa9e15bc40be2615ef67cdf023f660a.tar.gz"
++BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="https://github.com/analogdevicesinc/linux/archive/b486fe824008ce25f56036b03d891063e6f233a8.tar.gz"
+ #BR2_LINUX_KERNEL_DEFCONFIG="zynq_pluto"
+ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,140 @@
+From d1107c203478b2a05846fed8d2edfb8065e6975c Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Sat, 24 Oct 2026 01:16:00 +0200
+Subject: [PATCH 13/14] Build satdump, sdr_usb_gadget and pluto_stream against
+ libiio0
+
+These three packages (and the DATV boards that select them) use the libiio
+0.x API, which the system libiio 1.0.0 no longer provides headers for. Build
+them against the private libiio 0.26 with an rpath, like libad9361-iio.
+
+Build-verified for the plutoskyr2 configuration only; not run on hardware.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ package/pluto_stream/Config.in           |  2 +-
+ package/pluto_stream/pluto-stream.mk     | 14 ++++++++++----
+ package/satdump/Config.in                |  1 +
+ package/satdump/satdump.mk               |  7 +++++--
+ package/sdr_usb_gadget/Config.in         |  2 +-
+ package/sdr_usb_gadget/sdr_usb_gadget.mk |  7 +++++--
+ 6 files changed, 23 insertions(+), 10 deletions(-)
+
+diff --git a/package/pluto_stream/Config.in b/package/pluto_stream/Config.in
+index b699af5..1d07c07 100644
+--- a/package/pluto_stream/Config.in
++++ b/package/pluto_stream/Config.in
+@@ -2,7 +2,7 @@ config BR2_PACKAGE_PLUTO_STREAM
+ 	bool "pluto-stream"
+ 	depends on BR2_TOOLCHAIN_HAS_THREADS
+ 	depends on BR2_ARM_CPU_HAS_NEON
+-	select BR2_PACKAGE_LIBIIO
++	select BR2_PACKAGE_LIBIIO0
+ 	select BR2_PACKAGE_MOSQUITTO
+ 	select BR2_PACKAGE_JQ
+ 	help
+diff --git a/package/pluto_stream/pluto-stream.mk b/package/pluto_stream/pluto-stream.mk
+index 5f7f649..4779b16 100644
+--- a/package/pluto_stream/pluto-stream.mk
++++ b/package/pluto_stream/pluto-stream.mk
+@@ -15,20 +15,26 @@ PLUTO_STREAM_LICENSE = GPL-2.0+
+ 
+ # Runtime & build dependencies
+ # (adjust names to match what is actually available in your Buildroot tree)
+-PLUTO_STREAM_DEPENDENCIES = libiio mosquitto libgse ne10 libwebsockets libopenssl
++# uses the libiio 0.x API: built against the private libiio 0.26
++PLUTO_STREAM_DEPENDENCIES = libiio0 mosquitto libgse ne10 libwebsockets libopenssl
++
++# The upstream Makefile ignores CFLAGS and LDFLAGS, so the paths of libiio 0.26
++# go with the compiler
++PLUTO_STREAM_LIBIIO0_FLAGS = -I$(LIBIIO0_INCLUDEDIR) \
++	-L$(STAGING_DIR)$(LIBIIO0_PREFIX)/lib $(LIBIIO0_RPATH)
+ 
+ # ---- Generic-package build steps ------------------------------------------
+ 
+ define PLUTO_STREAM_BUILD_CMDS
+ 	$(MAKE) -C $(@D) \
+-		CC="$(TARGET_CC)" \
+-		CXX="$(TARGET_CXX)" \
++		CC="$(TARGET_CC) $(PLUTO_STREAM_LIBIIO0_FLAGS)" \
++		CXX="$(TARGET_CXX) $(PLUTO_STREAM_LIBIIO0_FLAGS)" \
+ 		CFLAGS="$(TARGET_CFLAGS)" \
+ 		CXXFLAGS="$(TARGET_CXXFLAGS)" \
+ 		LDFLAGS="$(TARGET_LDFLAGS)" \
+ 		all
+ 	$(MAKE) -C $(@D)/obsctrl \
+-		CXX="$(TARGET_CXX)" \
++		CXX="$(TARGET_CXX) $(PLUTO_STREAM_LIBIIO0_FLAGS)" \
+ 		CXXFLAGS="$(TARGET_CXXFLAGS)" \
+ 		LDFLAGS="$(TARGET_LDFLAGS)"
+ endef
+diff --git a/package/satdump/Config.in b/package/satdump/Config.in
+index b06c66f..3feec0c 100644
+--- a/package/satdump/Config.in
++++ b/package/satdump/Config.in
+@@ -2,6 +2,7 @@ config BR2_PACKAGE_SATDUMP
+ 	bool "satdump"
+ 	select BR2_PACKAGE_VOLK
+ 	select BR2_PACKAGE_NANOMSG
++	select BR2_PACKAGE_LIBIIO0
+ 	help
+ 	  Satdump
+ 	  github (release)
+diff --git a/package/satdump/satdump.mk b/package/satdump/satdump.mk
+index 5631b6c..b643662 100644
+--- a/package/satdump/satdump.mk
++++ b/package/satdump/satdump.mk
+@@ -8,7 +8,8 @@ SATDUMP_VERSION = 29a86d5f674cec114bce07d9455c2325d5ba2c29 # master, pinned 2026
+ SATDUMP_SITE = $(call github,SatDump,SatDump,$(SATDUMP_VERSION))
+ SATDUMP_INSTALL_STAGING = YES
+ 
+-SATDUMP_DEPENDENCIES = volk nng libpng tiff zstd libiio
++# the PlutoSDR source plugin uses the libiio 0.x API: built against the private libiio 0.26
++SATDUMP_DEPENDENCIES = volk nng libpng tiff zstd libiio0
+ 
+ # Fix: Surgically remove the exact lines forcing -march=native
+ define SATDUMP_REMOVE_MARCH_NATIVE
+@@ -111,7 +112,9 @@ SATDUMP_CONF_OPTS = -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_SHARED_LIBS=ON -DB
+ -DPLUGIN_SDRPP_SERVER_SUPPORT=OFF \
+ -DPLUGIN_NET_SOURCE_SDR_SUPPORT=OFF \
+ -DPLUGIN_REMOTE_SDR_SUPPORT=OFF \
+--DCMAKE_CXX_FLAGS="$(TARGET_CXXFLAGS) -DANGELSCRIPT_GENERIC_ONLY"
++-DCMAKE_CXX_FLAGS="$(TARGET_CXXFLAGS) -DANGELSCRIPT_GENERIC_ONLY -I$(LIBIIO0_INCLUDEDIR)" \
++-DIIO_LIBRARY=$(LIBIIO0_LIBRARY) \
++$(LIBIIO0_CMAKE_LINKER_OPTS)
+ 
+ SATDUMP_INSTALL_STAGING = YES
+ 
+diff --git a/package/sdr_usb_gadget/Config.in b/package/sdr_usb_gadget/Config.in
+index ef72ae4..24aa554 100644
+--- a/package/sdr_usb_gadget/Config.in
++++ b/package/sdr_usb_gadget/Config.in
+@@ -1,6 +1,6 @@
+ config BR2_PACKAGE_SDR_USB_GADGET
+         bool "sdr_usb_gadget"
+-        select BR2_PACKAGE_LIBIIO
++        select BR2_PACKAGE_LIBIIO0
+         select BR2_PACKAGE_LIBAIO
+         help
+           Low latency SDR streaming gadget. Transferring IIO buffer
+diff --git a/package/sdr_usb_gadget/sdr_usb_gadget.mk b/package/sdr_usb_gadget/sdr_usb_gadget.mk
+index 30ba984..58a460a 100644
+--- a/package/sdr_usb_gadget/sdr_usb_gadget.mk
++++ b/package/sdr_usb_gadget/sdr_usb_gadget.mk
+@@ -1,8 +1,11 @@
+ SDR_USB_GADGET_VERSION = 7339ab52678459da4c52a457f3259d52e7adf007
+ SDR_USB_GADGET_SITE = https://github.com/pgreenland/pluto-sdr-usb-gadget/archive
+ SDR_USB_GADGET_SOURCE = $(SDR_USB_GADGET_VERSION).tar.gz
+-SDR_USB_GADGET_DEPENDENCIES = libiio libaio
+-SDR_USB_GADGET_CONF_OPTS = -DGIT_VERSION_OVERRIDE=7339ab52678459da4c52a457f3259d52e7adf007 -DGENERATE_STATS=OFF
++# uses the libiio 0.x API: built against the private libiio 0.26
++SDR_USB_GADGET_DEPENDENCIES = libiio0 libaio
++SDR_USB_GADGET_CONF_OPTS = -DGIT_VERSION_OVERRIDE=7339ab52678459da4c52a457f3259d52e7adf007 -DGENERATE_STATS=OFF \
++	-DCMAKE_C_FLAGS="$(TARGET_CFLAGS) -I$(LIBIIO0_INCLUDEDIR)" \
++	-DCMAKE_EXE_LINKER_FLAGS="$(TARGET_LDFLAGS) -L$(STAGING_DIR)$(LIBIIO0_PREFIX)/lib $(LIBIIO0_RPATH)"
+ 
+ $(eval $(cmake-package))
+ 
+-- 
+2.53.0
+

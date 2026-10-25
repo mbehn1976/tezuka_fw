@@ -1,0 +1,57 @@
+From b761491986e83680f8304b6ea148f6fdfa6449bc Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Thu, 22 Oct 2026 23:16:32 +0200
+Subject: [PATCH 01/14] Update Buildroot to 2026.08.1 and rust-wasm to 1.97.1
+
+Buildroot 2026.08.1 (released 2026-10-22) replaces 2026.05.2. BR_SHA256 is
+the value Buildroot publishes in the signed buildroot-2026.08.1.tar.gz.sign;
+BR_SHA256_GITHUB is the checksum of the GitHub tag archive.
+
+Buildroot 2026.08 ships rustc 1.97.1, so rust-wasm must follow: with the
+1.96.1 wasm32 standard library maia-wasm fails with core compiled by an
+incompatible version of rustc.
+
+Both defconfigs configure without warnings and keep their options. Built
+for pluto and plutoplus; boot and RF tests are still to do.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ buildroot.version              | 6 +++---
+ package/rust-wasm/rust-wasm.mk | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/buildroot.version b/buildroot.version
+index 18685d5..7c32006 100644
+--- a/buildroot.version
++++ b/buildroot.version
+@@ -1,11 +1,11 @@
+ # Buildroot release, sourced by getbuildroot.sh (KEY=VALUE, no quotes --
+ # plain POSIX shell source). CI never parses this file directly; it only
+ # hashes its content into cache keys (see main.yml).
+-BR_VERSION=2026.05.2
+-BR_SHA256=f1c8157570bdc452163db2ff109978246cd25b4e93d3c4c9fefaeee3c4d6982d
++BR_VERSION=2026.08.1
++BR_SHA256=38a6c152490096018720a9ade379ee1e571c9bf5f93a3657a166566945a98b0d
+ # GitHub mirror of gitlab.com/buildroot.org/buildroot (github.com/buildroot/buildroot),
+ # used by getbuildroot.sh as a fallback when buildroot.org itself is
+ # unreachable (real outage observed 2026-08-23). Its tag-archive tarball is
+ # packaged differently than the official dist tarball above, so it needs its
+ # own checksum -- bump it alongside BR_VERSION/BR_SHA256 on a version bump.
+-BR_SHA256_GITHUB=85bc6b52b77a6e1e5f2235eb7fb7c6ac3e23e4abc1d78e5318408de60baeabc4
++BR_SHA256_GITHUB=5313d2b5c366ecb6771543a8a587e5fab57d4c254c6c99e575f44466c248dee1
+diff --git a/package/rust-wasm/rust-wasm.mk b/package/rust-wasm/rust-wasm.mk
+index 35ab990..dc3be92 100644
+--- a/package/rust-wasm/rust-wasm.mk
++++ b/package/rust-wasm/rust-wasm.mk
+@@ -7,7 +7,7 @@
+ # When updating this version, check whether support/download/cargo-post-process
+ # still generates the same archives.
+ # Must match Buildroot's host-rustc version (check with host/bin/rustc --version)
+-RUST_WASM_VERSION = 1.96.1
++RUST_WASM_VERSION = 1.97.1
+ RUST_WASM_SITE = https://static.rust-lang.org/dist
+ RUST_WASM_LICENSE = Apache-2.0 or MIT
+ RUST_WASM_LICENSE_FILES = LICENSE-APACHE LICENSE-MIT
+-- 
+2.53.0
+

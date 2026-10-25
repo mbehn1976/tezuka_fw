@@ -1,0 +1,300 @@
+From 9631f8a9c9946dc6625d53d563c1a50aecfb460c Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Fri, 23 Oct 2026 23:22:11 +0200
+Subject: [PATCH 12/14] Add libiio0: libiio 0.26 for the programs that use the
+ 0.x API
+
+libiio 1.0 has no 0.x headers and its libiio.so.0 compatibility layer
+runs 0.x programs with a different buffer model: SoapyPlutoSDR did not
+stream through it (RX stalled, TX could not create its buffer), plutotx
+fell back to its low speed buffer mode and the layer prints a banner on
+stdout. libad9361-iio, SoapyPlutoSDR and kalibrate are now built
+against a private libiio 0.26 (library only, /usr/libiio0/lib, found
+through an rpath) and plutotx, a prebuilt program, gets the same rpath
+from post-build.sh with patchelf.
+
+Also pass CMAKE_POLICY_VERSION_MINIMUM to SoapyPlutoSDR: CMake 4 of the
+new Buildroot refuses its cmake_minimum_required, so a clean build failed.
+
+Tested on Pluto+ with the files copied to the running board:
+SoapySDRUtil rate tests (RX 2.5 and 10 Msps, TX 2.5 Msps) give the same
+rates as the real libiio 0.26, plutotx runs in high speed mode, kal scans.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ Config.in                              |  1 +
+ board/tezuka/common/post-build.sh      |  6 ++
+ package/kalibrate/Config.in            |  2 +
+ package/kalibrate/kalibrate.mk         |  7 ++-
+ package/libad9361-iio/Config.in        |  3 +-
+ package/libad9361-iio/libad9361-iio.mk |  8 ++-
+ package/libiio0/Config.in              | 22 +++++++
+ package/libiio0/libiio0.hash           |  3 +
+ package/libiio0/libiio0.mk             | 85 ++++++++++++++++++++++++++
+ package/soapyplutosdr/Config.in        |  2 +-
+ package/soapyplutosdr/soapyplutosdr.mk |  9 ++-
+ 11 files changed, 142 insertions(+), 6 deletions(-)
+ create mode 100644 package/libiio0/Config.in
+ create mode 100644 package/libiio0/libiio0.hash
+ create mode 100644 package/libiio0/libiio0.mk
+
+diff --git a/Config.in b/Config.in
+index bd19093..f75284c 100644
+--- a/Config.in
++++ b/Config.in
+@@ -20,6 +20,7 @@ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/gr-dvbs2rx/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/gr-satellite/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/gr-pdu/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/kalibrate/Config.in"
++source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/libiio0/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/libad9361-iio/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/libgse/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/pluto_stream/Config.in"
+diff --git a/board/tezuka/common/post-build.sh b/board/tezuka/common/post-build.sh
+index a6a4e9f..10def96 100755
+--- a/board/tezuka/common/post-build.sh
++++ b/board/tezuka/common/post-build.sh
+@@ -5,6 +5,12 @@ BOARD_DIR="$(dirname "$0")"
+ 
+ grep -q mtd2 "${TARGET_DIR}/etc/fstab" || echo "mtd2 /mnt/jffs2 jffs2 rw,noatime 0 0" >> "${TARGET_DIR}/etc/fstab"
+ 
++# plutotx is a prebuilt program for the libiio 0.x API: let it find the private
++# libiio 0.26 (package libiio0) instead of the 0.x compatibility layer of libiio 1.0
++if [ -d "${TARGET_DIR}/usr/libiio0/lib" ] && [ -f "${TARGET_DIR}/root/plutotx" ]; then
++	"${HOST_DIR}/bin/patchelf" --set-rpath /usr/libiio0/lib "${TARGET_DIR}/root/plutotx"
++fi
++
+ # Prepare LICENSE.html
+ if [ ! -e "${BINARIES_DIR}/msd" ]; then
+ 	mkdir "${BINARIES_DIR}/msd"
+diff --git a/package/kalibrate/Config.in b/package/kalibrate/Config.in
+index aebb50c..8785dee 100644
+--- a/package/kalibrate/Config.in
++++ b/package/kalibrate/Config.in
+@@ -1,5 +1,7 @@
+ config BR2_PACKAGE_KALIBRATE
+         bool "kalibrate"
++        depends on BR2_TOOLCHAIN_HAS_THREADS
++        select BR2_PACKAGE_LIBIIO0
+         
+         select BR2_PACKAGE_FFTW 
+         select BR2_PACKAGE_FFTW_DOUBLE
+diff --git a/package/kalibrate/kalibrate.mk b/package/kalibrate/kalibrate.mk
+index 0825c3b..c17360b 100644
+--- a/package/kalibrate/kalibrate.mk
++++ b/package/kalibrate/kalibrate.mk
+@@ -9,7 +9,12 @@
+ KALIBRATE_VERSION = 1062eeaaa8ab7c684171e3cb6b75ae52bd7e8c8c
+ KALIBRATE_SITE = https://github.com/F5OEO/kalibrate-hydrasdr/archive
+ KALIBRATE_SOURCE = $(KALIBRATE_VERSION).tar.gz
+-KALIBRATE_DEPENDENCIES = fftw-double
++# built against the private libiio 0.26: kal uses the 0.x API
++KALIBRATE_DEPENDENCIES = fftw-double libiio0
++KALIBRATE_CONF_OPTS = \
++	-DLIBIIO_INCLUDE_DIR=$(LIBIIO0_INCLUDEDIR) \
++	-DLIBIIO_LIBRARY=$(LIBIIO0_LIBRARY) \
++	$(LIBIIO0_CMAKE_LINKER_OPTS)
+ KALIBRATE_INSTALL_STAGING = YES
+ KALIBRATE_LICENSE = BSD-2.0
+ KALIBRATE_LICENSE_FILES = COPYING
+diff --git a/package/libad9361-iio/Config.in b/package/libad9361-iio/Config.in
+index f51812b..75f4e0e 100644
+--- a/package/libad9361-iio/Config.in
++++ b/package/libad9361-iio/Config.in
+@@ -1,6 +1,7 @@
+ config BR2_PACKAGE_LIBAD9361_IIO
+ 	bool "libad9361-iio"
+-	depends on BR2_PACKAGE_LIBIIO
++	depends on BR2_TOOLCHAIN_HAS_THREADS
++	select BR2_PACKAGE_LIBIIO0
+ 	help
+ 	  AD9361 IIO helper library: fast-lock profile management,
+ 	  baseband rate / FIR filter setup, and other convenience
+diff --git a/package/libad9361-iio/libad9361-iio.mk b/package/libad9361-iio/libad9361-iio.mk
+index e402dd7..cee0cb1 100644
+--- a/package/libad9361-iio/libad9361-iio.mk
++++ b/package/libad9361-iio/libad9361-iio.mk
+@@ -10,13 +10,17 @@ LIBAD9361_IIO_SITE = $(call github,analogdevicesinc,libad9361-iio,$(LIBAD9361_II
+ LIBAD9361_IIO_LICENSE = LGPL-2.1
+ LIBAD9361_IIO_LICENSE_FILES = COPYING.txt
+ LIBAD9361_IIO_INSTALL_STAGING = YES
+-LIBAD9361_IIO_DEPENDENCIES = libiio
++# built against the private libiio 0.26: this library uses the 0.x API
++LIBAD9361_IIO_DEPENDENCIES = libiio0
+ 
+ LIBAD9361_IIO_CONF_OPTS = \
+ 	-DENABLE_PACKAGING=OFF \
+ 	-DBUILD_TESTS=OFF \
+ 	-DWITH_DOC=OFF \
+ 	-DPYTHON_BINDINGS=OFF \
+-	-DMATLAB_BINDINGS=OFF
++	-DMATLAB_BINDINGS=OFF \
++	-DLIBIIO_INCLUDEDIR=$(LIBIIO0_INCLUDEDIR) \
++	-DLIBIIO_LIBRARIES=$(LIBIIO0_LIBRARY) \
++	$(LIBIIO0_CMAKE_LINKER_OPTS)
+ 
+ $(eval $(cmake-package))
+diff --git a/package/libiio0/Config.in b/package/libiio0/Config.in
+new file mode 100644
+index 0000000..a800607
+--- /dev/null
++++ b/package/libiio0/Config.in
+@@ -0,0 +1,22 @@
++config BR2_PACKAGE_LIBIIO0
++	bool "libiio0 (libiio 0.26 for programs that use the 0.x API)"
++	depends on BR2_TOOLCHAIN_HAS_THREADS
++	select BR2_PACKAGE_LIBIIO
++	select BR2_PACKAGE_HOST_PATCHELF
++	help
++	  A private copy of libiio 0.26 (library only) installed in
++	  /usr/libiio0/lib, next to the libiio 1.0 of the system.
++
++	  libiio 1.0 changed the API and ABI. Programs that still use the
++	  0.x API (libad9361-iio, SoapyPlutoSDR, kalibrate and the
++	  prebuilt plutotx) are built against this copy and find it
++	  through an rpath. The libiio.so.0 compatibility layer of
++	  libiio 1.0 does not replace it: it runs these programs, but
++	  with a different buffer model (no non-blocking mode, no
++	  partial kernel buffer allocation), and SoapyPlutoSDR does not
++	  stream through it.
++
++	  https://github.com/analogdevicesinc/libiio
++
++comment "libiio0 needs a toolchain w/ threads"
++	depends on !BR2_TOOLCHAIN_HAS_THREADS
+diff --git a/package/libiio0/libiio0.hash b/package/libiio0/libiio0.hash
+new file mode 100644
+index 0000000..65b4d5e
+--- /dev/null
++++ b/package/libiio0/libiio0.hash
+@@ -0,0 +1,3 @@
++# Locally calculated
++sha256  fb445fb860ef1248759f45d4273a4eff360534480ec87af64c6b8db3b99be7e5  libiio-0.26.tar.gz
++sha256  102900208eef27b766380135906d431dba87edaa7ec6aa72e6ebd3dd67f3a97b  COPYING.txt
+diff --git a/package/libiio0/libiio0.mk b/package/libiio0/libiio0.mk
+new file mode 100644
+index 0000000..a6e28a1
+--- /dev/null
++++ b/package/libiio0/libiio0.mk
+@@ -0,0 +1,85 @@
++################################################################################
++#
++# libiio0
++#
++################################################################################
++
++# libiio 0.26 as a private library for programs that use the 0.x API; the
++# system libiio is 1.0 (patches/buildroot/0006-libiio-update-to-1.0.0.patch).
++# Everything is installed under /usr/libiio0 so nothing of the system libiio
++# is overwritten; the programs find the library through an rpath.
++LIBIIO0_VERSION = 0.26
++LIBIIO0_SOURCE = libiio-$(LIBIIO0_VERSION).tar.gz
++LIBIIO0_SITE = $(call github,analogdevicesinc,libiio,v$(LIBIIO0_VERSION))
++LIBIIO0_INSTALL_STAGING = YES
++LIBIIO0_LICENSE = LGPL-2.1+
++LIBIIO0_LICENSE_FILES = COPYING.txt
++
++LIBIIO0_PREFIX = /usr/libiio0
++# patchelf: board/tezuka/common/post-build.sh sets the rpath of plutotx
++LIBIIO0_DEPENDENCIES = host-patchelf
++
++LIBIIO0_CONF_OPTS = -DCMAKE_INSTALL_PREFIX=$(LIBIIO0_PREFIX) \
++	-DENABLE_IPV6=ON \
++	-DWITH_LOCAL_BACKEND=ON \
++	-DWITH_NETWORK_BACKEND=ON \
++	-DINSTALL_UDEV_RULE=OFF \
++	-DWITH_TESTS=OFF \
++	-DWITH_IIOD=OFF \
++	-DWITH_IIOD_USBD=OFF \
++	-DWITH_AIO=OFF \
++	-DWITH_DOC=OFF \
++	-DPYTHON_BINDINGS=OFF \
++	-DCSHARP_BINDINGS=OFF \
++	-DNO_THREADS=OFF
++
++ifeq ($(BR2_PACKAGE_LIBIIO_XML_BACKEND),y)
++LIBIIO0_DEPENDENCIES += libxml2
++LIBIIO0_CONF_OPTS += -DWITH_XML_BACKEND=ON
++else
++LIBIIO0_CONF_OPTS += -DWITH_XML_BACKEND=OFF
++endif
++
++ifeq ($(BR2_PACKAGE_LIBIIO_USB_BACKEND),y)
++LIBIIO0_DEPENDENCIES += libusb
++LIBIIO0_CONF_OPTS += -DWITH_USB_BACKEND=ON
++else
++LIBIIO0_CONF_OPTS += -DWITH_USB_BACKEND=OFF
++endif
++
++ifeq ($(BR2_PACKAGE_LIBIIO_SERIAL_BACKEND),y)
++LIBIIO0_DEPENDENCIES += libserialport
++LIBIIO0_CONF_OPTS += -DWITH_SERIAL_BACKEND=ON
++else
++LIBIIO0_CONF_OPTS += -DWITH_SERIAL_BACKEND=OFF
++endif
++
++ifeq ($(BR2_PACKAGE_AVAHI_LIBAVAHI_CLIENT),y)
++LIBIIO0_DEPENDENCIES += avahi
++LIBIIO0_CONF_OPTS += -DHAVE_DNS_SD=ON
++else
++LIBIIO0_CONF_OPTS += -DHAVE_DNS_SD=OFF
++endif
++
++# only the shared library goes to the target
++define LIBIIO0_REMOVE_DEV_FILES_TARGET
++	rm -rf $(TARGET_DIR)$(LIBIIO0_PREFIX)/include \
++		$(TARGET_DIR)$(LIBIIO0_PREFIX)/lib/pkgconfig \
++		$(TARGET_DIR)$(LIBIIO0_PREFIX)/lib/libiio.so \
++		$(TARGET_DIR)$(LIBIIO0_PREFIX)/bin \
++		$(TARGET_DIR)$(LIBIIO0_PREFIX)/sbin
++endef
++LIBIIO0_POST_INSTALL_TARGET_HOOKS += LIBIIO0_REMOVE_DEV_FILES_TARGET
++
++# Variables for the packages built against libiio0: the include directory,
++# the library and a linker flag that finds the library at run time.
++LIBIIO0_INCLUDEDIR = $(STAGING_DIR)$(LIBIIO0_PREFIX)/include
++LIBIIO0_LIBRARY = $(STAGING_DIR)$(LIBIIO0_PREFIX)/lib/libiio.so
++LIBIIO0_RPATH = -Wl,-rpath,$(LIBIIO0_PREFIX)/lib
++# the linker flags go to CMake as a whole, so they repeat Buildroot's own
++LIBIIO0_CMAKE_LINKER_OPTS = \
++	-DCMAKE_EXE_LINKER_FLAGS="$(TARGET_LDFLAGS) $(LIBIIO0_RPATH)" \
++	-DCMAKE_SHARED_LINKER_FLAGS="$(TARGET_LDFLAGS) $(LIBIIO0_RPATH)" \
++	-DCMAKE_MODULE_LINKER_FLAGS="$(TARGET_LDFLAGS) $(LIBIIO0_RPATH)"
++
++$(eval $(cmake-package))
+diff --git a/package/soapyplutosdr/Config.in b/package/soapyplutosdr/Config.in
+index 92655f1..269a15a 100644
+--- a/package/soapyplutosdr/Config.in
++++ b/package/soapyplutosdr/Config.in
+@@ -2,7 +2,7 @@ config BR2_PACKAGE_SOAPYPLUTOSDR
+ 	bool "soapyplutosdr"
+ 	depends on BR2_TOOLCHAIN_HAS_THREADS
+ 	depends on BR2_PACKAGE_SOAPY_SDR
+-	select BR2_PACKAGE_LIBIIO
++	select BR2_PACKAGE_LIBIIO0
+ 	select BR2_PACKAGE_LIBAD9361_IIO
+ 	help
+ 	  Soapy SDR plugin for PlutoSDR-Tezuka
+diff --git a/package/soapyplutosdr/soapyplutosdr.mk b/package/soapyplutosdr/soapyplutosdr.mk
+index ef4971d..cb373cc 100644
+--- a/package/soapyplutosdr/soapyplutosdr.mk
++++ b/package/soapyplutosdr/soapyplutosdr.mk
+@@ -10,7 +10,14 @@ SOAPYPLUTOSDR_SITE = $(call github,F5OEO,SoapyPlutoPAPR,95f31398924e75a03a846a21
+ SOAPYPLUTOSDR_INSTALL_STAGING = YES
+ SOAPYPLUTOSDR_LICENSE = Boost Software License 1.0
+ SOAPYPLUTOSDR_LICENSE_FILES = LICENSE
+-SOAPYPLUTOSDR_DEPENDENCIES = soapy-sdr libiio libad9361-iio
++# built against the private libiio 0.26: the plugin and libad9361-iio use the 0.x API
++SOAPYPLUTOSDR_DEPENDENCIES = soapy-sdr libiio0 libad9361-iio
++# CMake 4 refuses the cmake_minimum_required of this old project
++SOAPYPLUTOSDR_CONF_OPTS = \
++	-DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
++	-DLibIIO_INCLUDE_DIR=$(LIBIIO0_INCLUDEDIR) \
++	-DLibIIO_LIBRARY=$(LIBIIO0_LIBRARY) \
++	$(LIBIIO0_CMAKE_LINKER_OPTS)
+ #SOAPYPLUTOSDR_MASTER_CONF_OPTS = -DENABLE_PYTHON3=OFF -DENABLE_PYTHON=OFF
+ # -DCFLAGS=$(TARGET_CC) -DCXXFLAGS=$(TARGET_CXX)
+ 
+-- 
+2.53.0
+

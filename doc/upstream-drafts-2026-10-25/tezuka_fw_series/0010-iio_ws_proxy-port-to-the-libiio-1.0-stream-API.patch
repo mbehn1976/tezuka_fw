@@ -1,0 +1,398 @@
+From 46460d93aaaaa0788380559971d20b2f3dc72c9f Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Fri, 23 Oct 2026 23:01:04 +0200
+Subject: [PATCH 10/14] iio_ws_proxy: port to the libiio 1.0 stream API
+
+RX uses an iio_stream of eight blocks, one WebSocket frame per block;
+the stream is dropped and recreated after an error and released when
+the lazy mode has no client. TX streaming (four blocks) fills the current
+block from the WebSocket and hands it over with the next
+iio_stream_get_next_block. The cyclic mode (-l, used by the signal
+generator) plays one cyclic block: the data is collected in a staging
+buffer and a new push closes and reopens the buffer, because libiio 1.0
+and the kernel refuse a second cyclic block (EBUSY). The 0.x version
+wrote into the playing buffer and failed the second push with EBUSY.
+
+Tested on Pluto+ against the 0.x build: RX frames identical in -1, all
+channels, -C (size) and -L modes, TX stream tone correct, cyclic push of
+a second tone replaces the first, full duplex at the real-time rate.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ app/iio_ws/iio_ws_proxy.c | 215 ++++++++++++++++++++++++++++----------
+ 1 file changed, 162 insertions(+), 53 deletions(-)
+
+diff --git a/app/iio_ws/iio_ws_proxy.c b/app/iio_ws/iio_ws_proxy.c
+index cab330c..d6f0a66 100644
+--- a/app/iio_ws/iio_ws_proxy.c
++++ b/app/iio_ws/iio_ws_proxy.c
+@@ -14,7 +14,7 @@
+  * buffer's worth has arrived, then hands it to the DAC thread.  WS
+  * frame boundaries are ignored on the TX path for throughput.
+  *
+- * RX framing: each iio_buffer_refill() result becomes one binary WS frame.
++ * RX framing: each block of the libiio RX stream becomes one binary WS frame.
+  *
+  * Build (cross-compile for Pluto):
+  * $(CC) -O2 -o iio_ws_proxy iio_ws_proxy.c -liio -lwebsockets -lpthread
+@@ -44,7 +44,7 @@
+ 
+ #define _GNU_SOURCE
+ #include <libwebsockets.h>
+-#include <iio.h>
++#include <iio/iio.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -169,10 +169,18 @@ struct app {
+ 
+     /* IIO */
+     struct iio_context *iio;
+-    struct iio_device  *rx_dev;
+-    struct iio_device  *tx_dev;
+-    struct iio_buffer  *rx_buf;
+-    struct iio_buffer  *tx_buf;
++    const struct iio_device *rx_dev;
++    const struct iio_device *tx_dev;
++    struct iio_channels_mask *rx_mask;
++    struct iio_channels_mask *tx_mask;
++    struct iio_buffer  *rx_buffer;     /* device buffers (owned by the context) */
++    struct iio_buffer  *tx_buffer;
++    struct iio_stream  *rx_stream;     /* RX: kernel blocks, refilled in rx_thread */
++    struct iio_stream  *tx_stream;     /* TX: one block is filled while the others play */
++    struct iio_buffer_stream *tx_bs;   /* TX cyclic (-l): one block repeated in hardware */
++    struct iio_block   *tx_block;
++    bool                tx_playing;    /* cyclic block is enqueued and the buffer started */
++    uint8_t            *tx_dst;        /* start of the TX block the WS data is copied into */
+     size_t              sample_size;
+     size_t              buf_bytes;
+ 
+@@ -187,7 +195,7 @@ struct app {
+ 
+     /* IIO→WS ring (producer: rx_thread, consumer: ws_cb writeable) */
+     struct ring rx_ring;
+-    /* TX: WS writes directly into iio_buffer_start(); sem signals push.
++    /* TX: WS writes directly into the current TX block (tx_dst); sem signals push.
+      * Client must send frames that are multiples of sample_size so that
+      * tx_fill_len always reaches buf_bytes exactly (no straddle loss).
+      * Dashboard sends 64 KB frames; default buf_bytes = 1 MB = 16×64 KB. */
+@@ -232,23 +240,40 @@ static size_t pack_cs12(uint8_t *restrict dst, const int16_t *restrict src, size
+  * elements (RX1-only = 2: voltage0=I, voltage1=Q); 0 = all. The AD9361 exposes
+  * 4 RX scan elements (RX1 I/Q + RX2 I/Q); enabling all packs 8-byte slots that a
+  * single-RX consumer misreads, so RX1-only gives a clean 4-byte interleaved stream. */
+-static void enable_channels(struct iio_device *dev, unsigned max_scan)
++static void enable_channels(const struct iio_device *dev, struct iio_channels_mask *mask,
++                            unsigned max_scan)
+ {
+     unsigned n = iio_device_get_channels_count(dev);
+     unsigned en = 0;
+     for (unsigned i = 0; i < n; i++) {
+-        struct iio_channel *ch = iio_device_get_channel(dev, i);
++        const struct iio_channel *ch = iio_device_get_channel(dev, i);
+         if (iio_channel_is_scan_element(ch)) {
+             if (max_scan && en >= max_scan) {
+-                iio_channel_disable(ch);
++                iio_channel_disable(ch, mask);
+             } else {
+-                iio_channel_enable(ch);
++                iio_channel_enable(ch, mask);
+                 en++;
+             }
+         }
+     }
+ }
+ 
++/* Number of blocks of the RX stream (the kernel buffers count of the 0.x version) */
++#define RX_BLOCKS 8
++#define TX_BLOCKS 4
++
++/* (Re)create the RX stream, a new one owns the device buffer until it is destroyed */
++static struct iio_stream *rx_stream_open(struct app *a)
++{
++    struct iio_stream *st = iio_buffer_create_stream(a->rx_buffer, RX_BLOCKS, a->buf_samples, a->rx_mask);
++    int err = iio_err(st);
++    if (err) {
++        fprintf(stderr, "[rx] cannot create the stream: %s\n", strerror(-err));
++        return NULL;
++    }
++    return st;
++}
++
+ /* ------------------------------------------------------------------ */
+ /* DMA-aware memcpy                                                    */
+ /* ------------------------------------------------------------------ */
+@@ -291,40 +316,41 @@ static void *rx_thread(void *arg)
+     while (a->running) {
+         /* Lazy device hold: own cf-ad9361-lpc only while an RX client is connected,
+          * so ordinary libiio clients (SDR++/SDR#) can use the device when idle. All
+-         * rx_buf create/destroy stays in this one thread to avoid cross-thread races. */
++         * rx_stream create/destroy stays in this one thread to avoid cross-thread races. */
+         if (a->lazy) {
+             bool want = atomic_load_explicit(&a->want_rx, memory_order_acquire);
+-            if (want && !a->rx_buf) {
+-                enable_channels(a->rx_dev, a->rx1_only ? 2 : 0);
+-                a->rx_buf = iio_device_create_buffer(a->rx_dev, a->buf_samples, false);
+-                if (!a->rx_buf) { usleep(50000); continue; }
++            if (want && !a->rx_stream) {
++                a->rx_stream = rx_stream_open(a);
++                if (!a->rx_stream) { usleep(50000); continue; }
+                 fprintf(stderr, "[rx] client present -> acquired %s\n", a->rx_dev_name);
+-            } else if (!want && a->rx_buf) {
+-                struct iio_buffer *b = a->rx_buf;
+-                a->rx_buf = NULL;
+-                iio_buffer_destroy(b);
++            } else if (!want && a->rx_stream) {
++                struct iio_stream *b = a->rx_stream;
++                a->rx_stream = NULL;
++                iio_stream_destroy(b);
+                 fprintf(stderr, "[rx] no client -> released %s\n", a->rx_dev_name);
+             }
+-            if (!a->rx_buf) { usleep(20000); continue; }
++            if (!a->rx_stream) { usleep(20000); continue; }
+         }
+ 
+-        ssize_t nb = iio_buffer_refill(a->rx_buf);
+-        if (nb < 0) {
++        const struct iio_block *blk = iio_stream_get_next_block(a->rx_stream);
++        int berr = iio_err(blk);
++        if (berr) {
+             if (!a->running) break;
+-            if (-nb == ETIMEDOUT) continue;
+-            /* Survive a rate change / transient DMA error: drop the buffer and
++            if (-berr == ETIMEDOUT) continue;
++            /* Survive a rate change / transient DMA error: drop the stream and
+              * recreate it instead of dying, so the stream resumes by itself. */
+-            fprintf(stderr, "[rx] refill: %s -> recreating buffer\n", strerror(-nb));
+-            iio_buffer_destroy(a->rx_buf);
+-            a->rx_buf = NULL;
++            fprintf(stderr, "[rx] refill: %s -> recreating buffer\n", strerror(-berr));
++            iio_stream_destroy(a->rx_stream);
++            a->rx_stream = NULL;
+             if (!a->lazy) {
+-                enable_channels(a->rx_dev, a->rx1_only ? 2 : 0);
+-                a->rx_buf = iio_device_create_buffer(a->rx_dev, a->buf_samples, false);
+-                if (!a->rx_buf) { fprintf(stderr, "[rx] recreate failed\n"); break; }
++                a->rx_stream = rx_stream_open(a);
++                if (!a->rx_stream) { fprintf(stderr, "[rx] recreate failed\n"); break; }
+             }
+             usleep(50000);
+             continue;
+         }
++        const uint8_t *blk_start = iio_block_start(blk);
++        ssize_t nb = (const uint8_t *)iio_block_end(blk) - blk_start;
+ 
+         if (!atomic_load_explicit(&a->wsi_rx, memory_order_acquire))
+             continue;
+@@ -339,11 +365,11 @@ static void *rx_thread(void *arg)
+         if (a->do_cs12) {
+             /* nb bytes = nb/2 int16 samples -> nb*3/4 packed bytes (< raw, fits cap) */
+             bytes = pack_cs12(sl->buf + LWS_PRE,
+-                              (const int16_t *)iio_buffer_start(a->rx_buf),
++                              (const int16_t *)blk_start,
+                               (size_t)nb / sizeof(int16_t));
+         } else {
+             bytes = (size_t)nb < a->rx_ring.cap ? (size_t)nb : a->rx_ring.cap;
+-            memcpy_iio(sl->buf + LWS_PRE, iio_buffer_start(a->rx_buf), bytes);
++            memcpy_iio(sl->buf + LWS_PRE, blk_start, bytes);
+         }
+         sl->len = bytes;
+         ring_write_end(&a->rx_ring);
+@@ -351,13 +377,72 @@ static void *rx_thread(void *arg)
+         atomic_fetch_add_explicit(&a->rx_bytes, bytes, memory_order_relaxed);
+         lws_cancel_service(a->lws);
+     }
+-    if (a->lazy && a->rx_buf) { iio_buffer_destroy(a->rx_buf); a->rx_buf = NULL; }
++    if (a->lazy && a->rx_stream) { iio_stream_destroy(a->rx_stream); a->rx_stream = NULL; }
+     return NULL;
+ }
+ 
+ /* ------------------------------------------------------------------ */
+ /* IIO TX thread: semaphore-driven push to DAC                         */
+ /* ------------------------------------------------------------------ */
++/* Hand the filled TX block to the DAC; returns the bytes pushed or -errno.
++ * Streaming: the stream enqueues the filled block and returns the next free
++ * one, tx_dst then points into it. Cyclic (-l): the data is enqueued as one
++ * cyclic block that repeats in hardware until a new push replaces it. */
++static void tx_cyclic_close(struct app *a)
++{
++    if (!a->tx_bs)
++        return;
++    if (a->tx_playing)
++        iio_buffer_stream_stop(a->tx_bs);
++    if (a->tx_block)
++        iio_block_destroy(a->tx_block);
++    iio_buffer_close(a->tx_bs);
++    a->tx_bs = NULL;
++    a->tx_block = NULL;
++    a->tx_playing = false;
++}
++
++static ssize_t tx_push(struct app *a)
++{
++    if (!a->loop) {
++        const struct iio_block *blk = iio_stream_get_next_block(a->tx_stream);
++        int err = iio_err(blk);
++        if (err)
++            return err;
++        a->tx_dst = iio_block_start(blk);
++        return (ssize_t)a->buf_bytes;
++    }
++
++    /* Cyclic: the kernel refuses a second cyclic block on an open buffer
++     * (EBUSY), so a new push closes the buffer, reopens it and plays the data
++     * collected in tx_dst, which is a staging area, not the playing block. */
++    tx_cyclic_close(a);
++    int err;
++    a->tx_bs = iio_buffer_open(a->tx_buffer, a->tx_mask);
++    err = iio_err(a->tx_bs);
++    if (err) {
++        a->tx_bs = NULL;
++        return err;
++    }
++    a->tx_block = iio_buffer_stream_create_block(a->tx_bs, a->buf_bytes);
++    err = iio_err(a->tx_block);
++    if (err) {
++        a->tx_block = NULL;
++        tx_cyclic_close(a);
++        return err;
++    }
++    memcpy(iio_block_start(a->tx_block), a->tx_dst, a->buf_bytes);
++    err = iio_block_enqueue(a->tx_block, a->buf_bytes, true);
++    if (!err)
++        err = iio_buffer_stream_start(a->tx_bs);
++    if (err) {
++        tx_cyclic_close(a);
++        return err;
++    }
++    a->tx_playing = true;
++    return (ssize_t)a->buf_bytes;
++}
++
+ static void *tx_thread(void *arg)
+ {
+     struct app *a = arg;
+@@ -367,7 +452,7 @@ static void *tx_thread(void *arg)
+             continue;
+         if (!a->running) break;
+ 
+-        ssize_t n = iio_buffer_push(a->tx_buf);
++        ssize_t n = tx_push(a);
+         if (n < 0 && a->running)
+             fprintf(stderr, "[tx] push: %s\n", strerror(-n));
+         else if (n > 0)
+@@ -479,10 +564,10 @@ static int ws_cb(struct lws *wsi, enum lws_callback_reasons reason,
+             break;
+         if (!len) break;
+ 
+-        /* iio_buffer_start() pointer may change after each push (kernel rotates
+-         * DMA regions), so always re-read it here. tx_push_pending + flow-control
++        /* The TX block pointer changes after each push (the stream rotates
++         * its blocks), so always re-read it here. tx_push_pending + flow-control
+          * guarantee no RECEIVE fires while a push is in flight. */
+-        uint8_t        *iio_dst  = iio_buffer_start(A.tx_buf);
++        uint8_t        *iio_dst  = A.tx_dst;
+         const uint8_t  *src      = in;
+         size_t          space    = A.buf_bytes - A.tx_fill_len;
+         size_t          chunk    = len < space ? len : space;
+@@ -553,7 +638,8 @@ static void on_signal(int s)
+ {
+     (void)s;
+     A.running = false;
+-    if (A.rx_buf) iio_buffer_cancel(A.rx_buf);
++    if (A.rx_stream) iio_stream_cancel(A.rx_stream);
++    if (A.tx_stream) iio_stream_cancel(A.tx_stream);
+     if (A.lws)    lws_cancel_service(A.lws);
+     sem_post(&A.tx_push_sem);   /* unblock tx_thread if waiting */
+ }
+@@ -641,8 +727,8 @@ int main(int argc, char **argv)
+     signal(SIGTERM, on_signal);
+ 
+     fprintf(stderr, "iio: connecting %s\n", A.iio_uri);
+-    A.iio = iio_create_context_from_uri(A.iio_uri);
+-    if (!A.iio) { fprintf(stderr, "iio context failed\n"); return 1; }
++    A.iio = iio_create_context(NULL, A.iio_uri);
++    if (iio_err(A.iio)) { fprintf(stderr, "iio context failed\n"); return 1; }
+ 
+     iio_context_set_timeout(A.iio, IIO_TIMEOUT_MS);
+ 
+@@ -652,9 +738,14 @@ int main(int argc, char **argv)
+             fprintf(stderr, "device not found: %s\n", A.rx_dev_name);
+             return 1;
+         }
+-        enable_channels(A.rx_dev, A.rx1_only ? 2 : 0);
+-        iio_device_set_kernel_buffers_count(A.rx_dev, 8);
+-        A.sample_size = iio_device_get_sample_size(A.rx_dev);
++        A.rx_mask   = iio_create_channels_mask(iio_device_get_channels_count(A.rx_dev));
++        A.rx_buffer = iio_device_get_buffer(A.rx_dev, 0);
++        if (!A.rx_mask || !A.rx_buffer) {
++            fprintf(stderr, "rx buffer create failed\n");
++            return 1;
++        }
++        enable_channels(A.rx_dev, A.rx_mask, A.rx1_only ? 2 : 0);
++        A.sample_size = iio_device_get_sample_size(A.rx_dev, A.rx_mask);
+         A.buf_bytes   = A.buf_samples * A.sample_size;
+         if (A.lazy) {
+             /* Defer buffer creation to the RX thread (created on first WS client),
+@@ -662,8 +753,8 @@ int main(int argc, char **argv)
+             fprintf(stderr, "iio: RX dev=%s  lazy-hold (acquired on WS connect)  sample_size=%zu\n",
+                     A.rx_dev_name, A.sample_size);
+         } else {
+-            A.rx_buf = iio_device_create_buffer(A.rx_dev, A.buf_samples, A.loop);
+-            if (!A.rx_buf) { fprintf(stderr, "rx buffer create failed\n"); return 1; }
++            A.rx_stream = rx_stream_open(&A);
++            if (!A.rx_stream) { fprintf(stderr, "rx buffer create failed\n"); return 1; }
+             fprintf(stderr, "iio: RX dev=%s  samples=%zu  sample_size=%zu  buf=%zu B\n",
+                     A.rx_dev_name, A.buf_samples, A.sample_size, A.buf_bytes);
+         }
+@@ -675,14 +766,28 @@ int main(int argc, char **argv)
+             fprintf(stderr, "device not found: %s\n", A.tx_dev_name);
+             return 1;
+         }
+-        enable_channels(A.tx_dev, 0);
+-        iio_device_set_kernel_buffers_count(A.tx_dev, 4);
++        A.tx_mask   = iio_create_channels_mask(iio_device_get_channels_count(A.tx_dev));
++        A.tx_buffer = iio_device_get_buffer(A.tx_dev, 0);
++        if (!A.tx_mask || !A.tx_buffer) {
++            fprintf(stderr, "tx buffer create failed\n");
++            return 1;
++        }
++        enable_channels(A.tx_dev, A.tx_mask, 0);
+         if (!A.sample_size) {
+-            A.sample_size = iio_device_get_sample_size(A.tx_dev);
++            A.sample_size = iio_device_get_sample_size(A.tx_dev, A.tx_mask);
+             A.buf_bytes   = A.buf_samples * A.sample_size;
+         }
+-        A.tx_buf = iio_device_create_buffer(A.tx_dev, A.buf_samples, A.loop);
+-        if (!A.tx_buf) { fprintf(stderr, "tx buffer create failed\n"); return 1; }
++        if (A.loop) {
++            A.tx_dst = malloc(A.buf_bytes);
++            if (!A.tx_dst) { fprintf(stderr, "tx buffer create failed\n"); return 1; }
++        } else {
++            A.tx_stream = iio_buffer_create_stream(A.tx_buffer, TX_BLOCKS, A.buf_samples, A.tx_mask);
++            if (iio_err(A.tx_stream)) { fprintf(stderr, "tx buffer create failed\n"); return 1; }
++            /* the first call hands out the first block to fill, nothing is enqueued yet */
++            const struct iio_block *blk = iio_stream_get_next_block(A.tx_stream);
++            if (iio_err(blk)) { fprintf(stderr, "tx buffer create failed\n"); return 1; }
++            A.tx_dst = iio_block_start(blk);
++        }
+         fprintf(stderr, "iio: TX dev=%s\n", A.tx_dev_name);
+     }
+ 
+@@ -786,8 +891,12 @@ int main(int argc, char **argv)
+     if (A.do_tx) pthread_join(A.tx_tid, NULL);
+ 
+     lws_context_destroy(A.lws);
+-    if (A.rx_buf) iio_buffer_destroy(A.rx_buf);
+-    if (A.tx_buf) iio_buffer_destroy(A.tx_buf);
++    if (A.rx_stream) iio_stream_destroy(A.rx_stream);
++    if (A.tx_stream) iio_stream_destroy(A.tx_stream);
++    tx_cyclic_close(&A);
++    if (A.loop && A.do_tx) free(A.tx_dst);
++    if (A.rx_mask) iio_channels_mask_destroy(A.rx_mask);
++    if (A.tx_mask) iio_channels_mask_destroy(A.tx_mask);
+     iio_context_destroy(A.iio);
+     if (A.do_rx) ring_destroy(&A.rx_ring);
+     if (A.do_tx) sem_destroy(&A.tx_push_sem);
+-- 
+2.53.0
+

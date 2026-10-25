@@ -1,0 +1,227 @@
+From 7c8b17b9829307e273e75263f89589f553dbbc92 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Fri, 23 Oct 2026 22:51:00 +0200
+Subject: [PATCH 09/14] pluto_rx: port to the libiio 1.0 stream API
+
+Scan with iio_scan, attributes through iio_attr, a channels mask and
+iio_buffer_create_stream with the kernel buffer count as the number of
+blocks. The registers 0x80000088 are still read and written with
+iio_device_reg_read and iio_device_reg_write. The perf mode now sizes its
+blocks in the same unit as the first stream. Tested on Pluto+ against a
+tone from the Pluto: same samples as the 0.x build in 16 and 8 bit mode,
+with 4, 64 blocks and the default.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ app/pluto_rx/plutorx.c | 118 ++++++++++++++++++++++-------------------
+ 1 file changed, 64 insertions(+), 54 deletions(-)
+
+diff --git a/app/pluto_rx/plutorx.c b/app/pluto_rx/plutorx.c
+index f000ace..896e5c2 100644
+--- a/app/pluto_rx/plutorx.c
++++ b/app/pluto_rx/plutorx.c
+@@ -34,7 +34,7 @@
+ #include <getopt.h>
+ #include <ctype.h>
+ #include <termios.h>
+-#include <iio.h>
++#include <iio/iio.h>
+ 
+ #define PROGRAM_VERSION "0.0.1"
+ 
+@@ -221,67 +221,55 @@ int main(int argc, char **argv)
+     signal(SIGPIPE, signal_handler);
+ 
+     struct iio_context *ctx = NULL;
+-    //IIO Scan 
+-    struct iio_scan_context *scan_ctx = iio_create_scan_context("local:usb:ip", 0);
+-    struct iio_context_info **info;
+-    ssize_t ret = iio_scan_context_get_info_list(scan_ctx, &info);
+-    
+-    if (ret > 0)
++    //IIO Scan
++    struct iio_scan *scan = iio_scan(NULL, "local,usb,ip");
++    size_t found = iio_err(scan) ? 0 : iio_scan_get_results_count(scan);
++
++    for(size_t contextidx=0;contextidx<found;contextidx++)
+     {
+-        for(int contextidx=0;contextidx<ret;contextidx++)
++        // Get dev info
++        const char *dev_id = iio_scan_get_uri(scan, contextidx);
++        fprintf(stderr,"Discovered : %s\n",dev_id);
++        if(ctx==NULL && (strlen(type)==0 || strncmp(type,dev_id,strlen(type))==0))
+         {
+-            // Get dev info
+-            const char *dev_id = iio_context_info_get_uri(info[contextidx]);
+-            fprintf(stderr,"Discovered : %s\n",dev_id);
+-            if(strlen(type)>0)
+-            {
+-                //fprintf(stderr,"Comp %s %s\n",type,dev_id);
+-                if (strncmp(type,dev_id,strlen(type))==0)
+-                {
+-                    ctx=iio_create_context_from_uri(dev_id);
+-                    //ctx=iio_create_context_from_uri("ip:10.0.0.52");
+-                    fprintf(stderr,"Using %s \n",dev_id);
+-                }    
+-            }   
++            ctx=iio_create_context(NULL, dev_id);
++            if(iio_err(ctx))
++                ctx=NULL;
+             else
+-            if(ctx==NULL)
+-            {
+                 fprintf(stderr,"Using %s \n",dev_id);
+-                ctx=iio_create_context_from_uri(dev_id);
+-            }    
+-
+         }
+     }
+-        
+-    iio_scan_context_destroy(scan_ctx);
++
++    if(!iio_err(scan))
++        iio_scan_destroy(scan);
+     if(ctx==NULL)
+     {
+         fprintf(stderr,"Error : No plutosdr found ! Exiting");
+         exit(1);
+-    }    
++    }
+     // IIO Init
+-    
+-    /*
+-	ctx = iio_create_local_context();
+-    if(ctx==NULL)
+-        ctx=iio_create_network_context("10.0.0.52");
+-    */    
+     struct iio_device *dev =  iio_context_find_device(ctx, "ad9361-phy");
+     struct iio_device *rx = iio_context_find_device(ctx, "cf-ad9361-lpc");
+-    struct iio_channel *chnI = iio_device_get_channel(rx, 0);
+-    struct iio_channel *chnQ = iio_device_get_channel(rx, 1);
+-    iio_channel_enable(chnI);
+-    if(out_cs8)
+-         iio_channel_disable(chnQ);
+-     else    
+-         iio_channel_enable(chnQ);
++    const struct iio_channel *chnI = iio_device_get_channel(rx, 0);
++    const struct iio_channel *chnQ = iio_device_get_channel(rx, 1);
++    struct iio_channels_mask *mask = iio_create_channels_mask(iio_device_get_channels_count(rx));
++    struct iio_buffer *rxbuf = iio_device_get_buffer(rx, 0);
++    const struct iio_attr *rate_attr = iio_channel_find_attr(iio_device_find_channel(dev,"voltage0",false),"sampling_frequency");
++    if(!mask || !rxbuf || !rate_attr)
++    {
++        fprintf(stderr,"Error : cannot set up the RX buffer\n");
++        exit(1);
++    }
++    iio_channel_enable(chnI, mask);
++    if(!out_cs8)
++         iio_channel_enable(chnQ, mask);
+ 
+     size_t blockSize=1024;
+ 
+     if(SampleRate>0)
+     {
+ 
+-        iio_channel_attr_write_longlong(iio_device_find_channel(dev,"voltage0",false),"sampling_frequency",SampleRate); 
++        iio_attr_write_longlong(rate_attr,SampleRate);
+     }
+     
+     //#define SAMPLE_MINI 25000000/12
+@@ -292,7 +280,7 @@ int main(int argc, char **argv)
+     #define MAX_TOTAL_SIZE 60000000LL
+     #define MAX_CNT 64
+    
+-    iio_channel_attr_read_longlong(iio_device_find_channel(dev,"voltage0",false),"sampling_frequency",&SampleRate);
++    iio_attr_read_longlong(rate_attr,&SampleRate);
+    
+     // Get a 100 ms buffer    
+    
+@@ -309,8 +297,13 @@ int main(int argc, char **argv)
+     }    
+ 
+ 
+-    iio_device_set_kernel_buffers_count(dev, kernel_buffer_cnt);
+-    struct iio_buffer *rxbuf = iio_device_create_buffer(rx, blockSize/4, false); //2 because driver think it is 16bit 
++    // one stream of kernel_buffer_cnt blocks (0.x: kernel buffers count + buffer)
++    struct iio_stream *stream = iio_buffer_create_stream(rxbuf, kernel_buffer_cnt, blockSize/4, mask); //2 because driver think it is 16bit
++    if(iio_err(stream))
++    {
++        fprintf(stderr,"Error : cannot create the RX stream (%d)\n",iio_err(stream));
++        exit(1);
++    }
+     fprintf(stderr,"Using %d buffers of %ld bytes\n",kernel_buffer_cnt,blockSize);
+     if (outnetwork)
+     {
+@@ -333,7 +326,14 @@ int main(int argc, char **argv)
+         if(SampleRate)
+         while (want_quit == 0)
+         {
+-            size_t Size = iio_buffer_refill(rxbuf);
++            const struct iio_block *blk = iio_stream_get_next_block(stream);
++            if (iio_err(blk))
++            {
++                fprintf(stderr,"Error : cannot read a block (%d)\n",iio_err(blk));
++                break;
++            }
++            char *first = (char*)iio_block_first(blk, chnI);
++            size_t Size = (char*)iio_block_end(blk) - first;
+             
+             iio_device_reg_read(rx, 0x80000088, &val);
+             if (val & 4)
+@@ -348,12 +348,12 @@ int main(int argc, char **argv)
+ 
+                 //fprintf(stderr, "-> %04x %04x %04x  \n", RxBuffer[0] & 0xFFFF, RxBuffer[1] & 0xFFFF, RxBuffer[2] & 0xFFFF);
+                 //fprintf(stderr, "Rx %ld  \n",Size);
+-                udp_send((char*)iio_buffer_first(rxbuf, chnI), Size );
++                udp_send(first, Size );
+             }
+             else
+             {
+                
+-                     fwrite((char*)iio_buffer_first(rxbuf, chnI),1, Size, stdout);
++                     fwrite(first,1, Size, stdout);
+             }
+     
+         }
+@@ -365,15 +365,20 @@ int main(int argc, char **argv)
+         
+         for(SampleRate=out_cs8?SAMPLE_MINI*2:SAMPLE_MINI;(SampleRate<SAMPLE_MAX)&&(ErrorRead==0);SampleRate+=step)
+         {
+-            iio_channel_attr_write_longlong(iio_device_find_channel(dev,"voltage0",false),"sampling_frequency",SampleRate); 
+-            if(rxbuf!=NULL) iio_buffer_destroy(rxbuf);
++            iio_attr_write_longlong(rate_attr,SampleRate);
++            if(stream!=NULL) iio_stream_destroy(stream);
+             blockSize = SampleRate/8LL; 
+             blockSize=(blockSize>>2)<<2;
+             if(blockSize>MAX_BUFF_SIZE) blockSize=MAX_BUFF_SIZE;
+             kernel_buffer_cnt=MAX_TOTAL_SIZE/(blockSize);
+             if(kernel_buffer_cnt>MAX_CNT) kernel_buffer_cnt=MAX_CNT;
+-            iio_device_set_kernel_buffers_count(dev, kernel_buffer_cnt);
+-            struct iio_buffer *rxbuf = iio_device_create_buffer(rx, blockSize, false); //2 because driver think it is 16bit 
++            stream = iio_buffer_create_stream(rxbuf, kernel_buffer_cnt, blockSize/4, mask); //same unit as the first stream: blockSize is in bytes
++            if(iio_err(stream))
++            {
++                fprintf(stderr,"Error : cannot create the RX stream (%d)\n",iio_err(stream));
++                stream = NULL;
++                break;
++            }
+             fprintf(stderr,"Using %d buffers of %ld bytes\n",kernel_buffer_cnt,blockSize);
+ 
+            fprintf(stderr,"Trying sampleRate %lld\n",SampleRate);
+@@ -385,7 +390,12 @@ int main(int argc, char **argv)
+             for(size_t Read=0;(Read<ReadLength)&&(ErrorRead==0);Read++)
+             {
+                 if (want_quit == 1) return 0;
+-                size_t Size = iio_buffer_refill(rxbuf);
++                const struct iio_block *blk = iio_stream_get_next_block(stream);
++                if (iio_err(blk))
++                {
++                    ErrorRead++;
++                    break;
++                }
+                 
+                 iio_device_reg_read(rx, 0x80000088, &val);
+                 if (val & 4)
+-- 
+2.53.0
+

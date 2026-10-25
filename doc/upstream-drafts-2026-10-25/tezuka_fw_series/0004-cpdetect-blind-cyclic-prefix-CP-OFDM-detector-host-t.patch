@@ -1,0 +1,910 @@
+From ef958666571ec46c8c1c44b8de0e799acce52f89 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Wed, 14 Oct 2026 22:39:38 +0200
+Subject: [PATCH 04/14] cpdetect: blind cyclic-prefix (CP-OFDM) detector, host
+ tool and board app
+
+The PSD classifier sees power only. The cyclic prefix is a phase-coherent
+repetition in the complex samples, so this finds FFT size, guard length,
+symbol timing and fractional carrier offset of an OFDM signal from
+time-domain IQ without knowing the standard.
+
+- tools/cpdetect/cpdetect.py: numpy reference with a CLI and a selftest
+- tools/cpdetect/link_test.py: cabled two-board check
+- app/cpdetect: the same algorithm and thresholds in C (libiio or file),
+  JSON output and optional MQTT publish under state/cpdetect
+- package/cpdetect: Buildroot package, not enabled in any defconfig
+
+Checked on hardware (Pluto TX to Pluto+ RX through a 40 dB attenuator):
+OFDM N=1024/256/2048 found with the right guard, CW tone, single-carrier
+QPSK and noise rejected, the C binary matches the Python results and runs
+on the Pluto+ ARM in about 0.25 s per analysis. The package was
+cross-compiled by hand, not built through a full Buildroot run.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ Config.in                    |   1 +
+ app/cpdetect/Makefile        |  12 ++
+ app/cpdetect/cpdetect.c      | 381 +++++++++++++++++++++++++++++++++++
+ package/cpdetect/Config.in   |  10 +
+ package/cpdetect/cpdetect.mk |  21 ++
+ tools/cpdetect/README.md     |  86 ++++++++
+ tools/cpdetect/cpdetect.py   | 195 ++++++++++++++++++
+ tools/cpdetect/link_test.py  | 106 ++++++++++
+ 8 files changed, 812 insertions(+)
+ create mode 100644 app/cpdetect/Makefile
+ create mode 100644 app/cpdetect/cpdetect.c
+ create mode 100644 package/cpdetect/Config.in
+ create mode 100644 package/cpdetect/cpdetect.mk
+ create mode 100644 tools/cpdetect/README.md
+ create mode 100755 tools/cpdetect/cpdetect.py
+ create mode 100755 tools/cpdetect/link_test.py
+
+diff --git a/Config.in b/Config.in
+index 61a8482..bd19093 100644
+--- a/Config.in
++++ b/Config.in
+@@ -28,6 +28,7 @@ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/nng/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/fl2k-kmod/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/iio_ws/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/classifier/Config.in"
++source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/cpdetect/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/mqtt_pubd/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/sdroxide/Config.in"
+ source "$BR2_EXTERNAL_PLUTOSDR_PATH/package/longmynd/Config.in"
+diff --git a/app/cpdetect/Makefile b/app/cpdetect/Makefile
+new file mode 100644
+index 0000000..c080b43
+--- /dev/null
++++ b/app/cpdetect/Makefile
+@@ -0,0 +1,12 @@
++
++CC=$(CROSS_COMPILE)gcc
++ARCHFLAGS ?= -mfpu=neon -mfloat-abi=hard
++LIBS ?= -liio
++
++all: cpdetect
++
++cpdetect: cpdetect.c
++	$(CC) -O2 $(ARCHFLAGS) cpdetect.c -o cpdetect $(LIBS) -lm
++
++clean:
++	rm -f cpdetect
+diff --git a/app/cpdetect/cpdetect.c b/app/cpdetect/cpdetect.c
+new file mode 100644
+index 0000000..14956dd
+--- /dev/null
++++ b/app/cpdetect/cpdetect.c
+@@ -0,0 +1,381 @@
++/*
++ * cpdetect - blind cyclic-prefix (CP-OFDM) detector for the AD9361 RX stream.
++ *
++ * A CP-OFDM symbol of N useful samples is preceded by a copy of its last G
++ * samples, so y[i] equals y[i+N] (up to a phase) inside every prefix. For each
++ * hypothesis (N, G) the program forms cumulative sums of y[i]*conj(y[i+N]) and
++ * of the energy, computes the normalised correlation of every window of G
++ * samples, and folds it modulo the symbol length P = N + G. The right (N, G)
++ * gives one sharp peak at the symbol phase; noise, a CW tone (which correlates
++ * at every lag) and single-carrier signals give a flat curve and are rejected by
++ * the peak/mean ratio test. The phase of the correlation at the peak is the
++ * fractional carrier offset in subcarrier spacings.
++ *
++ * Same algorithm and thresholds as tools/cpdetect/cpdetect.py (the host tool and
++ * test reference); it only needs time-domain IQ, so it does not depend on the
++ * FPGA spectrometer.
++ *
++ * Input: libiio device (default local:, cf-ad9361-lpc) or an int16 interleaved
++ * I/Q file (-f). Output: one JSON line per analysis on stdout, optionally also
++ * published to MQTT as state/cpdetect/<key> (-M).
++ */
++#define _GNU_SOURCE
++#include <math.h>
++#include <signal.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++
++#ifndef NO_IIO
++#include <iio.h>
++#endif
++
++#define MIN_PEAK   0.12
++#define MIN_RATIO  3.0
++#define RATIO_CAP  12.0
++
++static const int Ns[]  = { 64, 128, 256, 512, 1024, 2048, 4096, 8192 };
++static const int GIs[] = { 4, 8, 16, 32 };        /* guard = N / gi */
++#define N_NS  ((int)(sizeof(Ns) / sizeof(Ns[0])))
++#define N_GIS ((int)(sizeof(GIs) / sizeof(GIs[0])))
++
++struct hyp {
++    int N, G, start;
++    double peak, ratio, eps, score;
++    bool ok, valid;
++};
++
++struct work {
++    double *csr, *csi, *ce;      /* cumulative sums, length Lmax + 1 */
++    double *fold, *sr, *si;      /* folded curve and summed correlation, length Pmax */
++    size_t cs_cap, fold_cap;
++};
++
++static volatile sig_atomic_t running = 1;
++
++static void on_signal(int s)
++{
++    (void)s;
++    running = 0;
++}
++
++static bool work_alloc(struct work *w, size_t cs_cap, size_t fold_cap)
++{
++    w->cs_cap = cs_cap;
++    w->fold_cap = fold_cap;
++    w->csr = malloc((cs_cap + 1) * sizeof(double));
++    w->csi = malloc((cs_cap + 1) * sizeof(double));
++    w->ce = malloc((cs_cap + 1) * sizeof(double));
++    w->fold = malloc(fold_cap * sizeof(double));
++    w->sr = malloc(fold_cap * sizeof(double));
++    w->si = malloc(fold_cap * sizeof(double));
++    return w->csr && w->csi && w->ce && w->fold && w->sr && w->si;
++}
++
++static void work_free(struct work *w)
++{
++    free(w->csr); free(w->csi); free(w->ce);
++    free(w->fold); free(w->sr); free(w->si);
++}
++
++/*
++ * Searches all (N, G) hypotheses over x (n complex samples, interleaved I,Q,
++ * already scaled). nsym symbols are used per hypothesis. *best receives the
++ * accepted hypothesis with the highest score (valid = false if none passed);
++ * *top receives the highest scoring hypothesis whether accepted or not.
++ */
++static void detect(const float *x, size_t n, int nsym, struct work *w,
++                   struct hyp *best, struct hyp *top)
++{
++    memset(best, 0, sizeof(*best));
++    memset(top, 0, sizeof(*top));
++
++    for (int a = 0; a < N_NS; a++) {
++        const int N = Ns[a];
++        const size_t lmax = (size_t)nsym * (N + N / GIs[0]);   /* longest symbol length first (gi = 4) */
++        if (lmax + N > n || lmax > w->cs_cap)
++            continue;
++
++        /* y[i] * conj(y[i + N]) and the energy, as cumulative sums */
++        double ar = 0, ai = 0, ae = 0;
++        w->csr[0] = w->csi[0] = w->ce[0] = 0;
++        for (size_t i = 0; i < lmax; i++) {
++            const double yr = x[2 * i], yi = x[2 * i + 1];
++            const double zr = x[2 * (i + N)], zi = x[2 * (i + N) + 1];
++            ar += yr * zr + yi * zi;            /* Re(y conj(z)) */
++            ai += yi * zr - yr * zi;            /* Im(y conj(z)) */
++            ae += 0.5 * (yr * yr + yi * yi + zr * zr + zi * zi);
++            w->csr[i + 1] = ar;
++            w->csi[i + 1] = ai;
++            w->ce[i + 1] = ae;
++        }
++
++        for (int b = 0; b < N_GIS; b++) {
++            const int G = N / GIs[b];
++            const int P = N + G;
++            const size_t L = (size_t)nsym * P;
++            const long D = (long)L - G + 1;
++            const long nfull = D / P;
++            if ((size_t)P > w->fold_cap || L < (size_t)(3 * P + G) || nfull < 2)
++                continue;
++
++            memset(w->fold, 0, P * sizeof(double));
++            memset(w->sr, 0, P * sizeof(double));
++            memset(w->si, 0, P * sizeof(double));
++            long ph = 0;
++            for (long d = 0; d < nfull * P; d++) {
++                const double sr = w->csr[d + G] - w->csr[d];
++                const double si = w->csi[d + G] - w->csi[d];
++                double en = w->ce[d + G] - w->ce[d];
++                if (en < 1e-12)
++                    en = 1e-12;
++                w->fold[ph] += sqrt(sr * sr + si * si) / en;
++                w->sr[ph] += sr;
++                w->si[ph] += si;
++                if (++ph == P)
++                    ph = 0;
++            }
++
++            int k = 0;
++            double mean = 0;
++            for (int i = 0; i < P; i++) {
++                w->fold[i] /= (double)nfull;
++                mean += w->fold[i];
++                if (w->fold[i] > w->fold[k])
++                    k = i;
++            }
++            mean /= P;
++            struct hyp h;
++            h.N = N;
++            h.G = G;
++            h.start = k;
++            h.peak = w->fold[k];
++            h.ratio = mean > 0 ? h.peak / mean : 0;
++            h.eps = -atan2(w->si[k], w->sr[k]) / (2 * M_PI);
++            h.score = h.peak * fmin(h.ratio, RATIO_CAP) / RATIO_CAP;
++            h.ok = h.peak > MIN_PEAK && h.ratio > MIN_RATIO;
++            h.valid = true;
++            if (!top->valid || h.score > top->score)
++                *top = h;
++            if (h.ok && (!best->valid || h.score > best->score))
++                *best = h;
++        }
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Output                                                              */
++/* ------------------------------------------------------------------ */
++static void mqtt_pub(const char *key, const char *value)
++{
++    char cmd[256];
++    /* key and value are program-generated numbers/words, never untrusted input */
++    snprintf(cmd, sizeof(cmd),
++             "/usr/bin/mosquitto_pub -i tezuka_cpdetect -t 'state/cpdetect/%s' -m '%s' 2>/dev/null", key, value);
++    if (system(cmd) != 0) { /* publishing is best effort */ }
++}
++
++static void report(const struct hyp *best, const struct hyp *top, double fs, size_t n, bool mqtt)
++{
++    const struct hyp *h = best->valid ? best : top;
++    char b[96];
++
++    printf("{\"samples\": %zu, \"detected\": %s", n, best->valid ? "true" : "false");
++    if (h->valid) {
++        /* a rejected hypothesis is only for diagnosis, so it is nested apart from a real result */
++        printf(best->valid ? ", " : ", \"best_rejected\": {");
++        printf("\"N\": %d, \"G\": %d, \"peak\": %.4f, \"ratio\": %.3f, \"start\": %d, \"eps\": %.4f",
++               h->N, h->G, h->peak, h->ratio, h->start, h->eps);
++        if (fs > 0)
++            printf(", \"spacing_hz\": %.2f, \"symbol_us\": %.2f, \"frac_cfo_hz\": %.1f",
++                   fs / h->N, (double)(h->N + h->G) / fs * 1e6, h->eps * fs / h->N);
++        if (!best->valid)
++            printf("}");
++    }
++    printf("}\n");
++    fflush(stdout);
++
++    if (mqtt) {
++        mqtt_pub("detected", best->valid ? "1" : "0");
++        if (best->valid) {
++            snprintf(b, sizeof(b), "%d", best->N);       mqtt_pub("fft_size", b);
++            snprintf(b, sizeof(b), "%d", best->G);       mqtt_pub("guard_samples", b);
++            snprintf(b, sizeof(b), "%.3f", best->peak);  mqtt_pub("peak", b);
++            snprintf(b, sizeof(b), "%.2f", best->ratio); mqtt_pub("ratio", b);
++            snprintf(b, sizeof(b), "%.4f", best->eps);   mqtt_pub("eps", b);
++            if (fs > 0) {
++                snprintf(b, sizeof(b), "%.2f", fs / best->N);
++                mqtt_pub("spacing_hz", b);
++            }
++        }
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Sample sources                                                      */
++/* ------------------------------------------------------------------ */
++static void int16_to_float(const int16_t *src, float *dst, size_t n_complex)
++{
++    for (size_t i = 0; i < 2 * n_complex; i++)
++        dst[i] = src[i] * (1.0f / 2048.0f);
++}
++
++static ssize_t read_file(const char *path, float *x, size_t n)
++{
++    FILE *f = fopen(path, "rb");
++    if (!f) {
++        perror(path);
++        return -1;
++    }
++    int16_t *tmp = malloc(n * 2 * sizeof(int16_t));
++    if (!tmp) {
++        fclose(f);
++        return -1;
++    }
++    size_t got = fread(tmp, 2 * sizeof(int16_t), n, f);
++    fclose(f);
++    int16_to_float(tmp, x, got);
++    free(tmp);
++    return (ssize_t)got;
++}
++
++static void usage(const char *prog)
++{
++    fprintf(stderr,
++        "Usage: %s [OPTIONS]\n"
++        "  -f FILE   analyse an int16 interleaved I/Q file instead of the radio\n"
++        "  -u URI    libiio context (default: local:)\n"
++        "  -d DEV    RX device (default: cf-ad9361-lpc)\n"
++        "  -s HZ     sample rate; read from ad9361-phy when capturing, needed with -f\n"
++        "            only for the Hz figures\n"
++        "  -n N      samples per analysis (default: 262144)\n"
++        "  -y NSYM   symbols folded per hypothesis (default: 12)\n"
++        "  -l        loop until interrupted\n"
++        "  -i SEC    interval between analyses with -l (default: 1.0)\n"
++        "  -M        also publish to MQTT as state/cpdetect/<key>\n"
++        "  -h        this help\n", prog);
++}
++
++int main(int argc, char **argv)
++{
++    const char *file = NULL, *uri = "local:", *devname = "cf-ad9361-lpc";
++    double fs = 0, interval = 1.0;
++    size_t n = 262144;
++    int nsym = 12, opt;
++    bool loop = false, mqtt = false;
++
++    while ((opt = getopt(argc, argv, "f:u:d:s:n:y:li:Mh")) != -1) {
++        switch (opt) {
++        case 'f': file = optarg; break;
++        case 'u': uri = optarg; break;
++        case 'd': devname = optarg; break;
++        case 's': fs = atof(optarg); break;
++        case 'n': n = (size_t)atol(optarg); break;
++        case 'y': nsym = atoi(optarg); break;
++        case 'l': loop = true; break;
++        case 'i': interval = atof(optarg); break;
++        case 'M': mqtt = true; break;
++        default: usage(argv[0]); return opt == 'h' ? 0 : 2;
++        }
++    }
++    if (nsym < 4 || n < 1024) {
++        fprintf(stderr, "bad -y or -n\n");
++        return 2;
++    }
++
++    signal(SIGINT, on_signal);
++    signal(SIGTERM, on_signal);
++
++    float *x = malloc(n * 2 * sizeof(float));
++    struct work w;
++    const size_t cs_cap = (size_t)nsym * (Ns[N_NS - 1] + Ns[N_NS - 1] / GIs[0]);
++    const size_t fold_cap = Ns[N_NS - 1] + Ns[N_NS - 1] / GIs[0];   /* longest P: gi = 4 */
++    if (!x || !work_alloc(&w, cs_cap, fold_cap)) {
++        fprintf(stderr, "out of memory\n");
++        return 1;
++    }
++
++    struct hyp best, top;
++    int rc = 0;
++
++    if (file) {
++        ssize_t got = read_file(file, x, n);
++        if (got < 0)
++            return 1;
++        detect(x, (size_t)got, nsym, &w, &best, &top);
++        report(&best, &top, fs, (size_t)got, mqtt);
++        work_free(&w);
++        free(x);
++        return 0;
++    }
++
++#ifdef NO_IIO
++    (void)uri;
++    (void)devname;
++    fprintf(stderr, "built without libiio: use -f FILE\n");
++    rc = 2;
++#else
++    struct iio_context *ctx = iio_create_context_from_uri(uri);
++    if (!ctx) {
++        fprintf(stderr, "cannot open libiio context %s\n", uri);
++        return 1;
++    }
++    struct iio_device *dev = iio_context_find_device(ctx, devname);
++    struct iio_device *phy = iio_context_find_device(ctx, "ad9361-phy");
++    if (!dev) {
++        fprintf(stderr, "device %s not found\n", devname);
++        iio_context_destroy(ctx);
++        return 1;
++    }
++    struct iio_channel *ch0 = iio_device_find_channel(dev, "voltage0", false);
++    struct iio_channel *ch1 = iio_device_find_channel(dev, "voltage1", false);
++    if (!ch0 || !ch1) {
++        fprintf(stderr, "RX channels voltage0/voltage1 not found\n");
++        iio_context_destroy(ctx);
++        return 1;
++    }
++    iio_channel_enable(ch0);
++    iio_channel_enable(ch1);
++    struct iio_buffer *buf = iio_device_create_buffer(dev, n, false);
++    if (!buf) {
++        fprintf(stderr, "cannot create a %zu sample buffer\n", n);
++        iio_context_destroy(ctx);
++        return 1;
++    }
++
++    while (running) {
++        long long rate = 0;
++        if (fs <= 0 && phy) {
++            struct iio_channel *pc = iio_device_find_channel(phy, "voltage0", false);
++            if (pc && iio_channel_attr_read_longlong(pc, "sampling_frequency", &rate) == 0)
++                fs = (double)rate;
++        }
++        ssize_t bytes = iio_buffer_refill(buf);
++        if (bytes < 0) {
++            fprintf(stderr, "buffer refill failed: %zd\n", bytes);
++            rc = 1;
++            break;
++        }
++        const int16_t *p = (const int16_t *)iio_buffer_first(buf, ch0);
++        size_t got = (size_t)((const char *)iio_buffer_end(buf) - (const char *)p) / iio_buffer_step(buf);
++        if (got > n)
++            got = n;
++        int16_to_float(p, x, got);
++        detect(x, got, nsym, &w, &best, &top);
++        report(&best, &top, fs, got, mqtt);
++        if (!loop)
++            break;
++        struct timespec ts = { (time_t)interval, (long)((interval - (long)interval) * 1e9) };
++        nanosleep(&ts, NULL);
++    }
++    iio_buffer_destroy(buf);
++    iio_context_destroy(ctx);
++#endif
++    work_free(&w);
++    free(x);
++    return rc;
++}
+diff --git a/package/cpdetect/Config.in b/package/cpdetect/Config.in
+new file mode 100644
+index 0000000..37d82cf
+--- /dev/null
++++ b/package/cpdetect/Config.in
+@@ -0,0 +1,10 @@
++config BR2_PACKAGE_CPDETECT
++	bool "cpdetect"
++	select BR2_PACKAGE_LIBIIO
++	help
++	  Blind cyclic-prefix (CP-OFDM) detector for the RX stream —
++	  reads time-domain IQ through libiio, finds the FFT size, guard
++	  length, symbol timing and fractional carrier offset of an OFDM
++	  signal without knowing the standard, and prints a JSON line
++	  (optionally also publishing to state/cpdetect/ over MQTT).
++	  Host-side reference and tests: tools/cpdetect.
+diff --git a/package/cpdetect/cpdetect.mk b/package/cpdetect/cpdetect.mk
+new file mode 100644
+index 0000000..91e69c9
+--- /dev/null
++++ b/package/cpdetect/cpdetect.mk
+@@ -0,0 +1,21 @@
++################################################################################
++#
++# CPDETECT
++#
++################################################################################
++
++
++CPDETECT_VERSION = master
++CPDETECT_SITE_METHOD = local
++CPDETECT_SITE = $(BR2_EXTERNAL_PLUTOSDR_PATH)/app/cpdetect
++CPDETECT_DEPENDENCIES = libiio
++
++define CPDETECT_BUILD_CMDS
++	$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) -C $(@D)
++endef
++
++define CPDETECT_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/cpdetect $(TARGET_DIR)/usr/bin/cpdetect
++endef
++
++$(eval $(generic-package))
+diff --git a/tools/cpdetect/README.md b/tools/cpdetect/README.md
+new file mode 100644
+index 0000000..3f7fd22
+--- /dev/null
++++ b/tools/cpdetect/README.md
+@@ -0,0 +1,86 @@
++# cpdetect - blind cyclic-prefix (CP-OFDM) detection
++
++Finds the FFT size N, guard length G, symbol timing and fractional carrier
++offset of a CP-OFDM signal from time-domain IQ, without knowing the standard.
++It complements the PSD template matching in `app/classifier`: that classifier
++sees power only, while the cyclic prefix is a property of the complex samples
++(a phase-coherent repetition) and is invisible in a power spectrum.
++
++| Part | What |
++|------|------|
++| `tools/cpdetect/cpdetect.py` | Host reference (numpy): CLI on a file or a libiio capture, `--selftest` |
++| `app/cpdetect/cpdetect.c` | Same algorithm and thresholds in C for the board, via libiio or a file |
++| `package/cpdetect` | Buildroot package (`BR2_PACKAGE_CPDETECT`, not enabled in any defconfig) |
++| `tools/cpdetect/link_test.py` | Two-board cabled check: OFDM and control signals over the air path |
++
++## Method
++
++For a hypothesis (N, G), `y[i] * conj(y[i+N])` has a stable phase inside every
++cyclic prefix and averages to zero elsewhere. Cumulative sums of that product
++and of the energy give, for every window of G samples,
++`rho[d] = |sum y[i] conj(y[i+N])| / energy`. Folding `rho` modulo `P = N + G`
++gives one sharp peak at the symbol phase for the right hypothesis. A hypothesis
++is accepted when `peak > 0.12` and `peak / mean(folded) > 3`. The ratio test is
++what rejects a CW tone: it correlates at every lag, so its folded curve is flat
++(peak 1.0, ratio 1.0). The phase of the summed correlation at the peak is
++`-2*pi*eps`, with `eps` the carrier offset in subcarrier spacings (fractional
++part only). The search covers N = 64..8192 and G = N/4, N/8, N/16, N/32, using
++about 12 symbols per hypothesis.
++
++## Usage
++
++```sh
++tools/cpdetect/cpdetect.py --selftest
++tools/cpdetect/cpdetect.py capture.cs16 --fs 2500000        # int16 interleaved I/Q
++tools/cpdetect/cpdetect.py --uri ip:192.168.2.1 --fs 2500000 --table 3
++tools/cpdetect/link_test.py 192.168.2.1 192.168.3.1         # TX board, RX board (cabled)
++
++# on the board (arm binary from app/cpdetect, or the package):
++cpdetect -s 2500000          # one analysis of the live RX stream, JSON on stdout
++cpdetect -l -i 2 -M          # repeat every 2 s and publish to state/cpdetect/<key>
++```
++
++Result line, for example:
++`{"samples": 262144, "detected": true, "N": 1024, "G": 128, "peak": 0.9987, "ratio": 5.060, "start": 1075, "eps": 0.0310, "spacing_hz": 2441.41, "symbol_us": 460.80, "frac_cfo_hz": 75.6}`
++When nothing passes, `detected` is false and the best hypothesis appears only
++under `best_rejected` for diagnosis. MQTT keys (with `-M`): `detected`,
++`fft_size`, `guard_samples`, `peak`, `ratio`, `eps`, `spacing_hz`.
++
++## Validation (measured)
++
++Synthetic (`--selftest`): QPSK OFDM, four (N, G) pairs, random symbol offset and
++fractional offset, SNR 20 and 5 dB: correct N and G, offset error below 0.01
++spacing. Noise, a CW tone, two tones and single-carrier QPSK are rejected.
++
++Hardware: original Pluto TX1 -> 40 dB attenuator -> Pluto+ RX1, LO 2.4 GHz,
++RX gain 45 dB manual, 1 s captures over libiio. All of these were found with
++the right N and G: OFDM N=1024 G=128 and N=256 G=32 at 2.5 MS/s, N=2048
++G=256 at 10 MS/s. At 2.5 MS/s, N=1024 G=128 with the transmit level lowered was
++still found at estimated SNR of 13, 3 and -2 dB and not found at -7 dB. A CW
++tone, single-carrier QPSK and a noise-only capture (TX at minimum, zero
++buffer) were rejected. The C binary gives the same peak, ratio, symbol start
++and offset as the Python tool on the same 12 capture files, and found and
++rejected the same cases when run on the Pluto+ itself (local libiio) against the
++transmitted signals.
++
++Offset check: with a weak CW tone sent in the same transmission as the OFDM
++signal, the CP-derived fractional offset agrees with the offset measured from
++the tone to within 0.005 subcarrier spacings (N=1024) and 0.014 (N=2048).
++The offset between two boards drifts by tens of Hz per minute (about 20 ppm
++apart at 2.4 GHz, warming), so repeated captures differ by a few hundredths of a
++spacing.
++
++## Limits
++
++- Needs time-domain IQ. Over libiio on Ethernet the stream is continuous only
++  up to about 10 MS/s (see `tools/iq_continuity`); above that, run the C
++  tool on the board.
++- On the board, one analysis of 262144 samples takes about 0.25 s on the
++  Pluto+ ARM (measured with a file input; double-precision loop, not
++  optimized).
++- It detects a cyclic prefix, not a standard: it says OFDM-like with this N
++  and G. Short guards (G of a few samples) give high folded peaks on noise;
++  only the ratio test keeps them out.
++- Only the fractional carrier offset is observable from the prefix.
++- Detection needs the signal to fill the capture bandwidth with at least a few
++  whole symbols; a burst shorter than about 12 symbols needs `-y`/`--nsym` lowered.
+diff --git a/tools/cpdetect/cpdetect.py b/tools/cpdetect/cpdetect.py
+new file mode 100755
+index 0000000..9afebbc
+--- /dev/null
++++ b/tools/cpdetect/cpdetect.py
+@@ -0,0 +1,195 @@
++#!/usr/bin/env python3
++"""Blind cyclic-prefix (CP-OFDM) detector for complex baseband samples.
++
++A CP-OFDM symbol of N useful samples is preceded by a copy of its last G samples, so for a sample i inside the
++prefix y[i] equals y[i+N] up to a phase. For a hypothesis (N, G) the product y[i]*conj(y[i+N]) therefore has a
++stable phase inside every prefix and averages to zero elsewhere. The detector takes cumulative sums of that product
++and of the energy, forms the normalised correlation of every window of G samples
++
++    rho[d] = |sum_{i=d}^{d+G-1} y[i] conj(y[i+N])| / energy
++
++and folds rho modulo the symbol length P = N + G. With the right (N, G) the folded curve has one sharp peak at the
++symbol phase. A wrong hypothesis, noise, a CW tone (which correlates at every lag) and single-carrier signals give a
++flat curve, which the peak/mean ratio test rejects.
++
++Besides N and G it gives the symbol start (samples, modulo P) and the fractional carrier frequency offset in
++subcarrier spacings (the phase of the correlation is -2*pi*eps). Only the fractional part is observable this way.
++
++The same algorithm is implemented in C in app/cpdetect for the board.
++
++Usage:
++  cpdetect.py capture.cs16 --fs 2500000          # int16 interleaved I/Q file ('-' for stdin)
++  cpdetect.py --uri ip:192.168.2.1 --fs 2500000  # capture with iio_readdev first (needs libiio tools on the host)
++  cpdetect.py --selftest                         # synthetic OFDM and negative controls
++"""
++import argparse
++import json
++import subprocess
++import sys
++
++import numpy as np
++
++DEFAULT_NS = (64, 128, 256, 512, 1024, 2048, 4096, 8192)
++DEFAULT_GIS = (4, 8, 16, 32)       # guard = N / gi
++
++
++def fold_metric(y, n, g):
++    """Folded normalised CP correlation for one (N, G).
++
++    Returns (F, Sc, nfull): F[P] mean rho per symbol phase, Sc[P] summed complex correlation per phase, nfull the
++    number of whole symbols folded. None if there is not enough data."""
++    p_len = n + g
++    length = len(y) - n
++    if length < 3 * p_len + g:
++        return None
++    prod = y[:length] * np.conj(y[n:n + length])
++    energy = 0.5 * (np.abs(y[:length]) ** 2 + np.abs(y[n:n + length]) ** 2)
++    csum = np.concatenate(([0], np.cumsum(prod)))
++    cen = np.concatenate(([0], np.cumsum(energy)))
++    d_len = length - g + 1
++    s = csum[g:g + d_len] - csum[:d_len]
++    en = cen[g:g + d_len] - cen[:d_len]
++    rho = np.abs(s) / np.maximum(en, 1e-12)
++    nfull = d_len // p_len
++    if nfull < 2:
++        return None
++    folded = rho[:nfull * p_len].reshape(nfull, p_len).mean(axis=0)
++    sc = s[:nfull * p_len].reshape(nfull, p_len).sum(axis=0)
++    return folded, sc, nfull
++
++
++def detect(y, ns=DEFAULT_NS, gis=DEFAULT_GIS, nsym=12, min_peak=0.12, min_ratio=3.0):
++    """Blind search over the hypotheses. Uses about nsym symbols of data per hypothesis.
++
++    Returns all hypotheses, best score first. Each entry: N, G, gi, peak (0..1), ratio (peak / mean of the folded
++    curve), start (samples modulo N+G where a CP begins), eps (fractional carrier offset in subcarrier spacings),
++    nsym (symbols folded), ok (peak and ratio above the thresholds), score."""
++    out = []
++    for n in ns:
++        for gi in gis:
++            g = n // gi
++            p_len = n + g
++            r = fold_metric(y[:int(nsym * p_len + n)], n, g)
++            if r is None:
++                continue
++            folded, sc, nfull = r
++            k = int(np.argmax(folded))
++            peak, mean = float(folded[k]), float(folded.mean())
++            ratio = peak / mean if mean > 0 else 0.0
++            eps = float(-np.angle(sc[k]) / (2 * np.pi))
++            out.append(dict(N=n, G=g, gi=gi, peak=peak, ratio=float(ratio), start=k, eps=eps, nsym=nfull,
++                            ok=bool(peak > min_peak and ratio > min_ratio),
++                            score=float(peak * min(ratio, 12.0) / 12.0)))
++    out.sort(key=lambda r: -r['score'])
++    return out
++
++
++def best(y, **kw):
++    """(best accepted hypothesis or None, full table)."""
++    table = detect(y, **kw)
++    ok = [r for r in table if r['ok']]
++    return (ok[0] if ok else None), table
++
++
++def read_cs16(src):
++    raw = np.fromfile(src if src != '-' else sys.stdin.buffer, dtype='<i2')
++    d = raw[:len(raw) // 2 * 2].reshape(-1, 2).astype(np.float64)
++    return d[:, 0] + 1j * d[:, 1]
++
++
++# ----------------------------------------------------------------------------------------------- test signals
++def ofdm(nsym, n, g, n_active, rng, amp=1.0):
++    """CP-OFDM with random QPSK on n_active carriers around DC (DC unused), unit rms times amp."""
++    ks = np.r_[1:n_active // 2 + 1, n - n_active // 2:n]
++    out = []
++    for _ in range(nsym):
++        x_f = np.zeros(n, complex)
++        x_f[ks] = (rng.choice([-1, 1], len(ks)) + 1j * rng.choice([-1, 1], len(ks))) / np.sqrt(2)
++        x = np.fft.ifft(x_f) * np.sqrt(n)
++        out.append(np.concatenate([x[-g:], x]))
++    x = np.concatenate(out)
++    return amp * x / np.sqrt(np.mean(np.abs(x) ** 2))
++
++
++def add_noise(x, snr_db, rng):
++    sigma = np.sqrt(np.mean(np.abs(x) ** 2) / 10 ** (snr_db / 10) / 2)
++    return x + sigma * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))
++
++
++def selftest():
++    rng = np.random.default_rng(1)
++    fails = 0
++    for n, g, na in ((1024, 128, 600), (2048, 256, 1200), (256, 64, 150), (512, 32, 300)):
++        x = ofdm(30, n, g, na, rng)
++        off = int(rng.integers(0, n + g))
++        eps = float(rng.uniform(-0.45, 0.45))
++        y0 = x * np.exp(2j * np.pi * eps * np.arange(len(x)) / n)
++        for snr in (20, 5):
++            y = add_noise(y0[off:], snr, rng)
++            b, _ = best(y)
++            start = (-off) % (n + g)
++            ok = (b is not None and (b['N'], b['G']) == (n, g) and abs(((b['eps'] - eps + .5) % 1) - .5) < 0.03
++                  and min((b['start'] - start) % (n + g), (start - b['start']) % (n + g)) <= 2)
++            print(f'  OFDM N={n} G={g} eps={eps:+.2f} SNR={snr:2d} dB: '
++                  f'{"ok" if ok else "FAIL"} ({b and (b["N"], b["G"], round(b["eps"], 3))})')
++            fails += not ok
++    m = 60000
++    tone = np.exp(2j * np.pi * 0.0873 * np.arange(m))
++    sym = (rng.choice([-1, 1], m // 4) + 1j * rng.choice([-1, 1], m // 4)) / np.sqrt(2)
++    negatives = {
++        'noise': add_noise(np.zeros(m, complex) + 1e-9, 0, rng),
++        'CW tone': add_noise(tone, 20, rng),
++        'two tones': add_noise(tone + np.exp(2j * np.pi * 0.21 * np.arange(m)), 20, rng),
++        'single-carrier QPSK': add_noise(np.convolve(np.repeat(sym, 4), np.ones(4) / 4, 'same'), 15, rng),
++    }
++    for name, y in negatives.items():
++        b, _ = best(y)
++        ok = b is None
++        print(f'  negative control {name}: {"ok (rejected)" if ok else "FAIL " + str((b["N"], b["G"]))}')
++        fails += not ok
++    print('selftest', 'PASSED' if not fails else f'FAILED ({fails})')
++    return 1 if fails else 0
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
++    ap.add_argument('file', nargs='?', help='int16 interleaved I/Q file, or - for stdin')
++    ap.add_argument('--uri', help='capture with iio_readdev from this libiio URI instead of reading a file')
++    ap.add_argument('--device', default='cf-ad9361-lpc')
++    ap.add_argument('--fs', type=float, help='sample rate in Hz (for spacing and offset in Hz)')
++    ap.add_argument('--samples', type=int, default=1 << 18, help='samples to use when capturing (default 262144)')
++    ap.add_argument('--nsym', type=int, default=12, help='symbols folded per hypothesis')
++    ap.add_argument('--table', type=int, default=0, help='also print the top N hypotheses')
++    ap.add_argument('--selftest', action='store_true')
++    a = ap.parse_args()
++    if a.selftest:
++        return selftest()
++    if a.uri:
++        raw = subprocess.run(['iio_readdev', '-u', a.uri, '-b', str(a.samples), '-s', str(a.samples), a.device,
++                              'voltage0', 'voltage1'], capture_output=True, check=True).stdout
++        d = np.frombuffer(raw, dtype='<i2').reshape(-1, 2).astype(np.float64)
++        y = d[:, 0] + 1j * d[:, 1]
++    elif a.file:
++        y = read_cs16(a.file)
++    else:
++        ap.error('give a file, --uri or --selftest')
++    b, table = best(y, nsym=a.nsym)
++    res = {'samples': len(y), 'detected': b is not None}
++    top = b or table[0]
++    fields = {k: top[k] for k in ('N', 'G', 'peak', 'ratio', 'start', 'eps')}
++    if a.fs:
++        fields['spacing_hz'] = a.fs / top['N']
++        fields['symbol_us'] = (top['N'] + top['G']) / a.fs * 1e6
++        fields['frac_cfo_hz'] = top['eps'] * a.fs / top['N']
++    if b is not None:
++        res.update(fields)
++    else:
++        res['best_rejected'] = fields      # for diagnosis only: failed the peak/ratio thresholds
++    print(json.dumps(res))
++    for r in table[:a.table]:
++        print('  ', json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()}))
++    return 0
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/tools/cpdetect/link_test.py b/tools/cpdetect/link_test.py
+new file mode 100755
+index 0000000..83424df
+--- /dev/null
++++ b/tools/cpdetect/link_test.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python3
++"""Cabled two-board check of cpdetect: TX board sends OFDM and control signals, the RX board is captured over libiio and
++analysed with cpdetect.py.
++
++Needs a cable (with attenuation) from the TX board's TX1 to the RX board's RX1 and the libiio tools on the host. Both
++boards' radio settings (rate, bandwidth, LO, gain, mode) are restored at the end.
++
++Usage: link_test.py <tx_host> <rx_host> [--rx-gain 45] [--tx-gain -10]
++"""
++import argparse
++import os
++import subprocess
++import sys
++import time
++
++import numpy as np
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from cpdetect import best, ofdm  # noqa: E402
++
++PHY = '/sys/bus/iio/devices/iio:device0'
++ATTRS = ['out_altvoltage0_RX_LO_frequency', 'out_altvoltage1_TX_LO_frequency', 'in_voltage0_gain_control_mode',
++         'in_voltage0_hardwaregain', 'out_voltage0_hardwaregain', 'in_voltage_sampling_frequency',
++         'in_voltage_rf_bandwidth', 'out_voltage_rf_bandwidth']
++SSH = ['sshpass', '-p', 'analog', 'ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
++       '-o', 'LogLevel=ERROR', '-o', 'ConnectTimeout=5']
++
++
++def ssh(host, cmd, stdin=None):
++    return subprocess.run(SSH + [f'root@{host}', cmd], input=stdin, capture_output=True,
++                          timeout=60).stdout.decode().strip()
++
++
++def save(host):
++    return {a: ssh(host, f'cat {PHY}/{a}').split()[0] for a in ATTRS}
++
++
++def restore(host, s):
++    ssh(host, '; '.join(f'echo {s[a]} > {PHY}/{a}' for a in (
++        'in_voltage_sampling_frequency', 'in_voltage_rf_bandwidth', 'out_voltage_rf_bandwidth',
++        'out_altvoltage0_RX_LO_frequency', 'out_altvoltage1_TX_LO_frequency', 'out_voltage0_hardwaregain',
++        'in_voltage0_gain_control_mode')))
++    if s['in_voltage0_gain_control_mode'] == 'manual':
++        ssh(host, f'echo {s["in_voltage0_hardwaregain"]} > {PHY}/in_voltage0_hardwaregain')
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
++    ap.add_argument('tx_host')
++    ap.add_argument('rx_host')
++    ap.add_argument('--rx-gain', type=float, default=45)
++    ap.add_argument('--tx-gain', type=float, default=-10)
++    a = ap.parse_args()
++    txh, rxh = a.tx_host, a.rx_host
++    rng = np.random.default_rng(7)
++    tx_saved, rx_saved = save(txh), save(rxh)
++
++    def start_tx(x, rms):
++        x = x / np.sqrt(np.mean(np.abs(x) ** 2)) * rms if rms else x * 0
++        iq = np.empty(2 * len(x), dtype='<i2')
++        iq[0::2], iq[1::2] = np.round(x.real), np.round(x.imag)
++        ssh(txh, 'kill $(pidof iio_writedev) 2>/dev/null; sleep 1')
++        ssh(txh, 'cat > /tmp/lt_tx.bin', stdin=iq.tobytes())
++        ssh(txh, f"printf '%s\\n' 'iio_writedev -c -b {len(x)} cf-ad9361-dds-core-lpc voltage0 voltage1 "
++                 f"< /tmp/lt_tx.bin > /dev/null 2>&1 &' > /tmp/lt_tx.sh; sh /tmp/lt_tx.sh")
++        time.sleep(2.5)
++        if ssh(txh, 'pidof iio_writedev | wc -w') != '1':
++            raise RuntimeError('TX writer not running')
++
++    def capture(fs, n=1 << 19):
++        raw = subprocess.run(['iio_readdev', '-u', f'ip:{rxh}', '-b', '262144', '-s', str(n), 'cf-ad9361-lpc',
++                              'voltage0', 'voltage1'], capture_output=True, timeout=120).stdout
++        d = np.frombuffer(raw, dtype='<i2').reshape(-1, 2).astype(float)
++        return d[:, 0] + 1j * d[:, 1]
++
++    rows = []
++    try:
++        ssh(txh, f'echo 2400000000 > {PHY}/out_altvoltage1_TX_LO_frequency; echo {a.tx_gain} > {PHY}/out_voltage0_hardwaregain')
++        ssh(rxh, f'echo 2400000000 > {PHY}/out_altvoltage0_RX_LO_frequency; echo manual > {PHY}/in_voltage0_gain_control_mode; '
++                 f'echo {a.rx_gain} > {PHY}/in_voltage0_hardwaregain')
++        for fs, bw, sigs in ((2500000, 2000000, [('OFDM', 1024, 128, 600), ('OFDM', 256, 32, 150), ('CW', 0, 0, 0)]),
++                             (10000000, 8000000, [('OFDM', 2048, 256, 1200), ('CW', 0, 0, 0)])):
++            for h in (txh, rxh):
++                ssh(h, f'echo {fs} > {PHY}/in_voltage_sampling_frequency; echo {bw} > {PHY}/in_voltage_rf_bandwidth; '
++                       f'echo {bw} > {PHY}/out_voltage_rf_bandwidth')
++            for kind, n, g, na in sigs:
++                if kind == 'OFDM':
++                    start_tx(ofdm(max(1, 115200 // (n + g)), n, g, na, rng), 3000)
++                else:
++                    start_tx(np.exp(2j * np.pi * 700000 * np.arange(25000) / fs), 6000)
++                b, tab = best(capture(fs))
++                got = f'N={b["N"]} G={b["G"]} peak={b["peak"]:.2f} ratio={b["ratio"]:.1f} eps={b["eps"]:+.3f}' if b \
++                    else f'none (top rejected: ratio {tab[0]["ratio"]:.2f})'
++                want = f'N={n} G={g}' if kind == 'OFDM' else 'none'
++                ok = (b is not None and (b['N'], b['G']) == (n, g)) if kind == 'OFDM' else b is None
++                rows.append(ok)
++                print(f'{fs / 1e6:5g} MS/s  {kind:5s} expected {want:14s} -> {got:55s} {"ok" if ok else "FAIL"}', flush=True)
++    finally:
++        ssh(txh, 'kill $(pidof iio_writedev) 2>/dev/null; sleep 1; rm -f /tmp/lt_tx.bin /tmp/lt_tx.sh')
++        restore(txh, tx_saved)
++        restore(rxh, rx_saved)
++    return 0 if rows and all(rows) else 1
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+-- 
+2.53.0
+

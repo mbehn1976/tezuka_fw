@@ -1,0 +1,5 @@
+Pluto and Pluto+: Linux 6.12.114 from a patched ADI kernel branch
+
+Kernel now comes from mbehn1976/linux branch tezuka/6.12.114-xlnx-2026r1: ADI xlnx/release/v6.12.y-2026r1 (b486fe8) with the stable releases 6.12.78 to 6.12.114 merged, the six Tezuka patches applied in the tree, and one fix for the AXI DAC data select (cf_axi_dds: attach the buffer setup ops again), which stops the TX tone that kept playing after the last writer closed. BR2_LINUX_KERNEL_PATCH is dropped for these two boards. Other boards keep the ADI pin and the patch directory.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
