@@ -1,0 +1,16 @@
+#!/bin/sh
+# libiio 1.0 merged iio_readdev and iio_writedev into iio_rwdev; keep the old
+# name working for existing scripts. Run as a child so the process keeps this
+# name for pidof/kill, and stop the child when this script is stopped.
+# A background job gets /dev/null as stdin unless it is redirected explicitly,
+# so keep stdin on fd 3 and redirect from there.
+exec 3<&0
+iio_rwdev -w "$@" <&3 3<&- &
+child=$!
+exec 3<&-
+trap 'kill $child 2>/dev/null' TERM INT HUP
+wait $child
+status=$?
+# wait returns early when a trapped signal arrives; reap the child
+while kill -0 $child 2>/dev/null; do wait $child; status=$?; done
+exit $status
