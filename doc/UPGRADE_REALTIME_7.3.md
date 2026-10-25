@@ -346,3 +346,23 @@ Host used: libiio 0.26 tools from the distribution, libiio 1.0.0 tools built fro
 The 1.0 client, clean in 30 runs at 5 MS/s, loses buffers at 10 MS/s as well, at a rate like the 0.26 client. So the loss is not a property of the 0.x protocol or of the client version. What is established: the on-board path is clean (0 of 30 at 5 MS/s);
 over Ethernet both client versions lose whole 262144-sample buffers at 10 MS/s (about one 5 s run in seven to ten), with RT and non-RT kernels and also with the pre-upgrade firmware; USB loses far more at 5 MS/s. Likely mechanism, not proven: a brief stall of the network consumer
 (TCP, host or iiod thread) lets the kernel DMA buffer queue overrun, which drops whole blocks. Candidate fixes to test: more kernel buffers in iiod/the client (block count), larger socket buffers, a larger transfer size.
+
+## 15. Next steps (as of 2026-10-25, in recommended order)
+
+1. **Decide the track.** (a) Network buffer losses, (b) RT latency tail and core isolation, (c) Linux 7.3. They are independent; (a) affects every user of the firmware, (b)/(c) only the RT goal.
+2. **(a) Network buffer losses** (whole 262144-sample buffers lost over Ethernet at 5 to 10 MS/s and over USB at 5 MS/s, all firmware, on-board path clean).
+   - Find out how many kernel blocks iiod and the client use. Client side: libiio 0.x has `iio_device_set_kernel_buffers_count()`, libiio 1.0 takes the block count in `iio_buffer_create_stream()`; the stock tools may not expose it, so use a small
+     C or pylibiio test with 4, 8, 16 blocks at 10 MS/s (30 runs each, `outlier_transports.py` pattern in `session-2026-10-25-rt/scripts`). Check iiod's own setting (`iiod --help` on the board; the start line is in `S23udc:176`).
+   - Try bigger socket buffers (`net.core.rmem_max`/`wmem_max`, `net.ipv4.tcp_rmem` on host and board), the GEM ring size (`ethtool -g eth0` on the board), host NIC offloads and CPU governor, and a direct cable/other host to rule out the laptop.
+   - Separate stalls: log timestamps of each `iio_readdev` buffer to see whether a loss follows a long read gap.
+   - USB is far worse (about 100 outliers per 30 runs at 5 MS/s); check it separately (USB 2.0 throughput, CDC-NCM vs RNDIS on the host side).
+   - Gate: 0 outliers in 100 runs at 10 MS/s with the chosen setting, tone check at the end.
+3. **(b) RT latency tail.** Boot `known_good/sdimg-rt21-trace`; copy `session-2026-10-25-rt/scripts/trace_board.sh` to the board and change `-a1` to `-a0`. Run `sh /tmp/trace_board.sh preemptoff 30` and `irqsoff` during 10 MS/s Ethernet streaming; for `wakeup_rt` the traced task is the highest-priority RT task, which is iiod (RR 99),
+   so either stop streaming or run `cyclictest` at SCHED_FIFO 99 and look at its wakeups. Goal: find the code behind the 100 to 250 us worst case on core 0 (idle max 65 to 103 us, target 50 us).
+4. **(b) Stage 4: core isolation.** Decide where iiod and the DSP threads live (iiod is pinned to core 1 at RR 99 in `S23udc:176`). Try `isolcpus=1 nohz_full=1 rcu_nocbs=1` on the SD variants in `uboot-env.txt`, `S99realtime` (draft in section 5), IRQ affinity (read the DMA IRQ names from `/proc/interrupts` first).
+   Re-measure idle and streaming latency with `cyclictest` on the isolated core; keep the web UI responsive (maia-httpd and mosquitto stay on core 0).
+5. **Open check on the RT image.** The CW-check FAIL (Pluto RX, Pluto+ TX, 2.5 MS/s, 205 kHz): run 30 repeats each on RT and non-RT to see whether the 1-in-6 rate on RT is real (non-RT 0 of 6 so far). Also the full suite once more after any RT config change.
+6. **Not done yet on RT:** the original Pluto (needs an RT image for it; the user flashes and ejects), the USB gadget (mass storage, network) under RT, an overnight soak, the DAC tone fix under streaming load.
+7. **(c) Linux 7.3.** Wait for the final 7.3 tag (newest was v7.3-rc7). Only then start stage 3 of section 3: branch from the tag in `mbehn1976/linux`, forward-port the ADI drivers and our six patches (ADI has no 7.x Zynq tree), fix compile errors per file, `make dtbs_check` on `zynq-plutoplus.dts`. Worth it only if RT on 6.12 proves insufficient or the user wants the newer kernel.
+8. **Housekeeping and decisions.** Nothing here is pushed. Before any push: where the RT kernel branch lives (fork `mbehn1976/linux`, or an F5OEO repo), whether `configs/plutoplus_rt_defconfig` stays a local-tarball config or gets a hosted pin. The earlier upstream items (F5OEO PR, ADI issue, kernel hosting) are in `HANDOVER.md` section 6 and
+   the memory file `project_upgrade_summary.md`. Also correct the old "10 MS/s Ethernet is drop-free" statements wherever they were made public (none were posted upstream so far).
