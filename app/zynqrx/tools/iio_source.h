@@ -125,8 +125,9 @@ public:
         if (!mask_ || !buf) { fprintf(stderr, "iio: cannot create the RX buffer\n"); return false; }
         iio_channel_enable(i_, mask_);
         if (!cs8_) iio_channel_enable(q_, mask_);
-        // eight blocks: a few extra ride out the receiver being busy
-        stream_ = iio_buffer_create_stream(buf, 8, kBlock, mask_);
+        // 32 blocks (2 M samples): a few extra ride out the receiver being busy, and over a network context the
+        // queue has to ride out stalls of the link (4 blocks of 262144 samples lost buffers at 10 MS/s, 8 did not)
+        stream_ = iio_buffer_create_stream(buf, 32, kBlock, mask_);
         if (iio_err(stream_)) { stream_ = nullptr; fprintf(stderr, "iio: cannot create the RX buffer\n"); return false; }
         return true;
     }
