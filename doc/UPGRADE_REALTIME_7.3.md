@@ -366,3 +366,41 @@ over Ethernet both client versions lose whole 262144-sample buffers at 10 MS/s (
 7. **(c) Linux 7.3.** Wait for the final 7.3 tag (newest was v7.3-rc7). Only then start stage 3 of section 3: branch from the tag in `mbehn1976/linux`, forward-port the ADI drivers and our six patches (ADI has no 7.x Zynq tree), fix compile errors per file, `make dtbs_check` on `zynq-plutoplus.dts`. Worth it only if RT on 6.12 proves insufficient or the user wants the newer kernel.
 8. **Housekeeping and decisions.** Nothing here is pushed. Before any push: where the RT kernel branch lives (fork `mbehn1976/linux`, or an F5OEO repo), whether `configs/plutoplus_rt_defconfig` stays a local-tarball config or gets a hosted pin. The earlier upstream items (F5OEO PR, ADI issue, kernel hosting) are in `HANDOVER.md` section 6 and
    the memory file `project_upgrade_summary.md`. Also correct the old "10 MS/s Ethernet is drop-free" statements wherever they were made public (none were posted upstream so far).
+
+### 14h. Block count fix test (RT image, libiio 1.0 client over Ethernet, 10 MS/s, 30 runs of 5 s per setting, shuffled order, no extra load, 2026-10-28, hardware-measured)
+
+Client: host `iio_rwdev` of libiio 1.0.0 with the stream block count taken from an environment variable (the stock tool hard-codes 4 in `iio_buffer_create_stream(buffer, 4, ...)`; patched copy saved as `session-2026-10-25-rt/scripts/iio_rwdev_nb_blocks.c`). Block size 262144 samples.
+
+| Blocks | Runs with outliers | Outliers (all on 262144 boundaries) |
+|---|---|---|
+| 4 (default) | 2 of 30 | 3 |
+| 8 | 0 of 30 | 0 |
+| 16 | 0 of 30 | 0 |
+| 32 | 0 of 30 | 0 |
+
+Reading: more kernel/stream blocks remove the whole-buffer losses in this test. Zero losses in 90 runs at 8 to 32 blocks against about 7 percent of runs at 4 blocks (the rate seen in all earlier tests) is unlikely to be chance (about 1 in 700), but 30 runs per setting is small.
+Mechanism fits the earlier hypothesis: a short stall of the network consumer overruns the 4-block queue. Still to do: confirm with 100 or more runs, check 12.5/15/20 MS/s (earlier "drops above 12 MS/s"), USB at 5 MS/s, and a 0.26 client with `iio_device_set_kernel_buffers_count()`.
+Practical consequence: the block count is chosen by the client, so stock clients (GNU Radio, SDR++, pyadi-iio) keep their own default; our own apps (iio_ws_proxy, zynqrx, pluto_rx, cpdetect) can use more blocks. Whether iiod can enforce a larger minimum is not checked.
+
+### 14i. Confirmation of the block count fix (RT image, libiio 1.0 client, Ethernet, 10 MS/s, 100 runs of 5 s per setting, shuffled, 2026-10-28, hardware-measured)
+
+| Blocks | Runs with outliers | Outliers (all on 262144 boundaries) |
+|---|---|---|
+| 4 (default) | 12 of 100 | 12 |
+| 16 | 0 of 100 | 0 |
+
+Together with 14h (8, 16 and 32 blocks: 0 of 90), the whole-buffer losses over Ethernet at 10 MS/s disappear with 8 or more blocks. Zero of 100 at 16 blocks against 12 percent at 4 blocks is not chance (about 1 in 300000). Tested with the libiio 1.0 client only, on the RT kernel;
+the same cause is expected on the non-RT kernel and with the 0.26 client (same loss rates there), which has not been tested with a larger count.
+
+### 14j. Block count at higher rates (RT image, libiio 1.0 client, Ethernet, 20 runs of 5 s per cell, shuffled, 2026-10-28, hardware-measured)
+
+| Rate | 4 blocks | 16 blocks | 32 blocks |
+|---|---|---|---|
+| 12.5 MS/s | 114 outliers, 20 of 20 runs | 2 outliers, 2 of 20 runs | 0 outliers, 0 of 20 runs |
+| 15 MS/s | 2665, 20 of 20 | 442, 20 of 20 | 228, 20 of 20 |
+| 20 MS/s | 5088, 20 of 20 | 2209, 20 of 20 | 2004, 20 of 20 |
+
+(an outlier is one lost 262144-sample buffer boundary, all of them sit on a boundary; a 5 s run at 15 MS/s holds about 286 buffers, at 20 MS/s about 380).
+Reading: more blocks push the clean range from about 7.5 MS/s (4 blocks, with sporadic losses already at 5 to 10 MS/s) to 12.5 MS/s (32 blocks, 0 of 20; 16 blocks nearly clean). At 15 MS/s and above every run loses buffers whatever the block count, about 11 per run at 32 blocks against 133 at 4 blocks;
+that matches the measured Ethernet throughput limit of roughly 50 MB/s (12.5 MS/s is 50 MB/s of 16-bit I/Q), where more blocks can only absorb bursts, not a sustained excess. So the practical Ethernet ceiling with this setup is about 12.5 MS/s with 32 blocks; faster rates need the data to stay on the board
+(local processing, maia-hdl) or a faster link. Not tested: the 0.26 client with a larger count, USB (far worse at 5 MS/s), non-RT kernel with 16/32 blocks.
