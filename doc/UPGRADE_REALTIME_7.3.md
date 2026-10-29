@@ -1,4 +1,4 @@
-# Linux 7.x and PREEMPT_RT on the Pluto+ (plan, state 2026-10-25)
+# Linux 7.x and PREEMPT_RT on the Pluto+ (plan, state 2026-10-25; RT track results in section 16, 2026-10-29)
 
 Goal: deterministic latency (worst case below 50 us) and no I/Q buffer drops on the Pluto+, starting from `dev/next`
 (= `upgrade/all-features` 32c3a90: Buildroot 2026.08.1, kernel 6.12.114, libiio 1.0.0, maia-sdr 415cea9).
@@ -404,3 +404,72 @@ the same cause is expected on the non-RT kernel and with the 0.26 client (same l
 Reading: more blocks push the clean range from about 7.5 MS/s (4 blocks, with sporadic losses already at 5 to 10 MS/s) to 12.5 MS/s (32 blocks, 0 of 20; 16 blocks nearly clean). At 15 MS/s and above every run loses buffers whatever the block count, about 11 per run at 32 blocks against 133 at 4 blocks;
 that matches the measured Ethernet throughput limit of roughly 50 MB/s (12.5 MS/s is 50 MB/s of 16-bit I/Q), where more blocks can only absorb bursts, not a sustained excess. So the practical Ethernet ceiling with this setup is about 12.5 MS/s with 32 blocks; faster rates need the data to stay on the board
 (local processing, maia-hdl) or a faster link. Not tested: the 0.26 client with a larger count, USB (far worse at 5 MS/s), non-RT kernel with 16/32 blocks.
+
+## 16. RT track summary: latency tail, core isolation, iiod placement (2026-10-28 to 2026-10-29, hardware-measured on the Pluto+)
+
+All numbers: Pluto+ on SD, kernel 6.12.114-rt21, `cyclictest -t1 -i250` (priority 98 or 99), libiio 1.0 client over Ethernet at 10 MS/s with 32 blocks unless stated.
+Raw logs and scripts: `hwtest/session-2026-10-25-rt/` (`NEXT_STEPS.md` has the chronological log, `scripts/`, `logs/`, `traces/`). Nothing here is pushed.
+
+### 16a. Where the idle tail comes from
+- `irqsoff` / `preemptoff` tracers on core 0, idle, function tracing OFF (`options/function-trace=0`): worst windows 61 us (irqsoff) and 86 us (preemptoff), both inside the context switch, not in a driver.
+  With function tracing ON irqsoff reads 464 us, which is tracer cost, not the system.
+- The tracers perturb the system under streaming (an irqsoff run stalled `cyclictest` for 41 ms). `wakeup_rt` costs about 70 us per wakeup because it always dumps a stack (`cyclictest` average 88 us instead of 18 us),
+  and an event trace (sched, irq, hrtimer) added 70 to 90 us even on an idle core. **ftrace cannot size a tail of about 50 us on this Cortex-A9**; use untraced `cyclictest` numbers for sizes and traces only for "what runs".
+- `cyclictest -a0` under the 10 MS/s stream, no tracer: max 210 to 436 us on core 0 (iiod's RR 99 threads share it).
+- `wakeup_rt` x5 under streaming on core 0: the iiod RR 99 threads (`net_client_thd`, `writer-task`, `buffer-*`) wait 51 to 81 ms behind each other, `ktimers/1` is starved for 81 ms (`sched_rr_timeslice_ms=100`).
+  Lowering iiod to SCHED_FIFO 40 made core 0 worse (19 to 51 ms) and was reverted.
+
+### 16b. Core isolation (`isolcpus=1 irqaffinity=0` on the sdboot_ram bootargs line; image `known_good/sdimg-rt21-iso`)
+- iiod threads moved to core 0 at runtime, `cyclictest -p99 -a1` on core 1: idle 120 s max 44 us (avg 15); under the 10 MS/s stream 300 s max 46 us. A core-0 reference run gave 50 us. **The 50 us target is met when nothing network-related runs on the isolated core.**
+- Kernel limits: `NO_HZ` is off and there is no `RCU_NOCB_CPU`, so `nohz_full`/`rcu_nocbs` need a kernel rebuild (not done).
+
+### 16c. What a loaded core 0 does to the stream (iiod on core 0, `cyclictest` on core 1, synthetic stressors pinned to core 0)
+
+| Stressor on core 0 | `cyclictest` core 1 max | Stream (20 rounds, 10 MS/s, 32 blocks) |
+|---|---|---|
+| `stress-ng --cpu 1` | 47 us | complete, but 45 to 65 lost-block outliers EVERY round, block gap median 42 to 52 ms (idle 26 ms) |
+| `stress-ng --vm 1 --vm-bytes 32M` | 74 us | outliers every round (29 to 64), later rounds incomplete (see 16f) |
+| cpu + vm together (1000 s) | 53 us | throughput halved, then the RX stream wedged (16f) |
+
+Isolation protects the RT core, not the stream: iiod and the Ethernet IRQ share core 0 with the load.
+
+### 16d. Placement test: iiod and the Ethernet IRQ on separate cores (CPU hog on core 0, `cyclictest` on core 1)
+
+| iiod | Ethernet IRQ 31 | Stream | `cyclictest` core 1 max |
+|---|---|---|---|
+| core 1 | core 0 | CLEAN: 0 outliers in 20 rounds, gap median 26.3 ms | 109 us |
+| core 0 (with the hog) | core 1 | 53 to 81 outliers per round, gap median 52 to 65 ms, RX wedge afterwards | 69 us |
+
+With real housekeeping load on core 0 (stock services plus two browser-like `/waterfall` websockets and `/api` polling at 5 Hz from the host), iiod on core 1: 20/20 rounds clean, `cyclictest` max 108 us; with the CPU hog added 112 us.
+Soak in this layout (iiod on core 1, `cyclictest` on core 1, websocket load): 87 min, 440 rounds, no loss in the middle of a stream (3 rounds with 1 to 2 outliers, all in the last block of the run = end-of-stream artifact), `cyclictest` max 91 to 139 us per 10 min segment (avg 25 to 27 us).
+
+### 16e. Why iiod on core 1 costs 40 to 60 us, and the `S23udc` nproc bug
+- Cause (traces, sizes from untraced runs): the `cyclictest` timer interrupt lands while the iiod writer thread is inside `sys_io_submit` -> `tcp_sendmsg` -> `tcp_gso_segment` -> `skb_segment` -> `kmalloc` -> `___slab_alloc`, which runs with interrupts off.
+  iiod's TCP transmit path on the isolated core is what lifts the max from 44 to 47 us (iiod on core 0) to 80 to 112 us.
+- iiod at SCHED_RR 99 on core 1 is unusable together with an RT task there: `cyclictest` max 63 ms and 88 ms (avg 120 us). The stream stays clean.
+- **Bug in the start script.** `S23udc` chooses its iiod start line with `NB_CORE=$(nproc)`; under `isolcpus=1` `nproc` reports 1 (it honours the affinity mask), so the single-core branch runs: iiod starts SCHED_OTHER and unpinned (the default mask excludes the isolated core, i.e. core 0).
+  All isolcpus tests above therefore used a SCHED_OTHER iiod that my scripts pinned at runtime with `taskset -p`; on non-isolcpus boots the `chrt -r 99 taskset -c 1` branch does run (earlier sections 11 and 14 are unaffected).
+  Proposed fix (NOT applied, to be reviewed): count cores from `/sys/devices/system/cpu/present` or `grep -c ^processor /proc/cpuinfo` instead of `nproc`, and for an isolcpus layout add an explicit `taskset -c <core>` without the `chrt -r 99`.
+
+### 16f. Open: RX stream wedge and iiod deaths (cause unknown)
+- RX wedge (twice): `Unable to dequeue block: Connection timed out (110)` on both the network and the local reader, iiod alive, AD9361 state and clocks fine; after the combined stressor load and after the placement variant with iiod on the hog's core. Cured by an ssh `reboot`.
+- iiod died twice without a trace (board up for 11 h and 35 min; no oom/segv/dmesg line; the `local:` backend liveness check does not need iiod and hid it the first time).
+  A foreground catcher (`scripts/iiod_wrap.sh`, core dumps on) saw no death in about 580 stream rounds / 2 hours of soaks, including the memory-stressor and event-trace cases that preceded the deaths. Not reproduced.
+- A memory stressor on core 0 breaks the stream (30 to 35 outliers per round) even with iiod on core 1; a CPU hog does not. That is DDR bandwidth, not scheduling.
+
+### 16g. Conclusion: two layouts, no layout with both goals on this dual-core Zynq 7010
+
+| Layout | `cyclictest` worst case | Stream at 10 MS/s over Ethernet | Use when |
+|---|---|---|---|
+| A. iiod and the Ethernet path on core 0, RT task on isolated core 1 | 44 to 47 us (idle and streaming); 47 to 53 us with a CPU hog, 74 us with a memory stressor | clean only while core 0 is not loaded (a CPU hog breaks it) | RT task needs under 50 us and nothing else heavy runs on core 0 |
+| B. iiod on core 1 (SCHED_OTHER), housekeeping and Ethernet IRQ on core 0 | 80 to 139 us | clean under housekeeping load and a CPU hog (440-round soak) | the network stream matters; RT task tolerates about 100 to 140 us |
+
+The RT kernel itself cuts the worst case from 220 to 265 us (non-RT) to 65 to 110 us; getting below 50 us needs layout A (or an RT task that does not share a core with the network transmit path).
+Stream integrity at 10 MS/s needs 32 blocks (section 14h to 14j) in both layouts. Above 12.5 MS/s the Ethernet link itself is the limit (section 14j).
+
+### 16h. Next steps (replaces the RT items of section 15)
+1. Decide the shipped layout (A or B) and fix `S23udc` (16e): firmware change, ask before making it, then hardware-verify on the Pluto+.
+2. Overnight soak with the shipped `-D` iiod and a board-side watcher (to catch an iiod death and the RX wedge); find the wedge cause (DMA IRQ counters, AD9361 and PL FIFO state at the moment of the stall).
+3. Reduce the iiod transmit-path cost on core 1 (TSO/GSO off, socket buffer sizes, packet size) and re-measure layout B.
+4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
+5. Linux 7.3 only after the final tag (section 3, stage 3); the RT result on 6.12 above is the baseline to beat.
