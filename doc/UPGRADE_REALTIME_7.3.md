@@ -462,7 +462,7 @@ Soak in this layout (iiod on core 1, `cyclictest` on core 1, websocket load): 87
 
 | Layout | `cyclictest` worst case | Stream at 10 MS/s over Ethernet | Use when |
 |---|---|---|---|
-| A. iiod and the Ethernet path on core 0, RT task on isolated core 1 | 44 to 47 us (idle and streaming); 47 to 53 us with a CPU hog, 74 us with a memory stressor | clean only while core 0 is not loaded (a CPU hog breaks it) | RT task needs under 50 us and nothing else heavy runs on core 0 |
+| A. iiod and the Ethernet path on core 0, RT task on isolated core 1 | 43 to 48 us (idle and streaming, shipped `S23udc`, 16j); 47 to 53 us with a CPU hog, 74 us with a memory stressor | NOT clean with the web UI waterfall open (25 of 25 rounds with lost blocks, 16 to 58 per round, 16j) and not with a CPU hog | RT task needs under 50 us and nobody streams I/Q over Ethernet while the web UI is open (on-board processing only) |
 | B. iiod on core 1 (SCHED_OTHER), housekeeping and Ethernet IRQ on core 0 | 80 to 139 us | clean under housekeeping load and a CPU hog (440-round soak) | the network stream matters; RT task tolerates about 100 to 140 us |
 
 The RT kernel itself cuts the worst case from 220 to 265 us (non-RT) to 65 to 110 us; getting below 50 us needs layout A (or an RT task that does not share a core with the network transmit path).
@@ -485,6 +485,20 @@ Reading: the two baselines agree on the share of cycles over 50 us (0.99% and 1.
 GSO off makes the tail worse (4 to 8% over 50 us; the same segmentation work is done as many small packets on core 1), the 64 KB output limit changes nothing. Nothing came near the 44 to 47 us of layout A. iiod stayed alive and the stream stayed clean in every case.
 A first run of this test was invalid and is not used: the soak's board-side monitor (`soak_mon.sh`) was still running `cyclictest` segments on core 1, so every case had a second `cyclictest` on the same core. Kill it after a soak.
 Not tried (each needs more than a runtime setting): jumbo frames (host NIC and root on the host), a smaller iiod send size (iiod change), shorter irq-off sections in the slab allocator (kernel change).
+
+### 16j. Shipped layout A on hardware: latency and stream check (image `known_good/sdimg-rt21-s23fix-iso`, 2026-10-29, hardware-measured)
+
+Pluto+ SD boot with `isolcpus=1 irqaffinity=0`, iiod started by the fixed `S23udc` with no runtime pinning (all threads mask 1 = core 0, SCHED_OTHER), `cyclictest -t1 -p99 -i250 -a1 -h 400`, 10 MS/s over Ethernet with 32 blocks, 25 stream rounds per phase.
+Load: the board's stock services; "waterfall load" = two `/waterfall` websockets and `/api` polling at 5 Hz from the host.
+
+| Phase | `cyclictest` max / avg (us) | samples >= 50 us | stream |
+|---|---|---|---|
+| idle, 120 s (480000 samples) | 43 / 15 | 0 | not run |
+| stream + waterfall load, 300 s (1.2M samples) | 48 / 15 | 0 | 25 of 25 rounds with lost blocks (16 to 58 per round, 1117 total), block gap median 34 to 45 ms (idle 26 ms) |
+| stream + waterfall load + `stress-ng --cpu 1` on core 0 | 44 / 15 | 0 | 25 of 25 rounds with lost blocks (14 to 72 per round, 1294 total), gap median 31 to 56 ms |
+
+iiod stayed alive in both stream phases. Reading: the isolated core meets 50 us with the shipped start script, matching the hand-pinned runs of 16b (44 to 47 us). The network stream, however, already loses blocks with only the waterfall websockets on core 0 (16c and the first version of 16g said "only when core 0 is loaded"; the waterfall load is enough).
+So layout A suits on-board processing (the I/Q path in maia-hdl and local processing is not affected) or a dedicated RT mode with the web UI closed; for a clean Ethernet stream next to the web UI only layout B held (16d, 440-round soak), at 80 to 139 us. Not tested on this image: the original Pluto, a longer soak, the CPU-hog-free stream without the waterfall load (16b/16c ran it without websockets).
 
 ### 16h. Next steps (replaces the RT items of section 15)
 1. Decide the shipped layout (A or B). `S23udc` is fixed and verified (16e); the isolation itself is still a boot-args choice (`isolcpus=1 irqaffinity=0` on the sdboot_ram line of `uboot-env.txt`), not yet a switch.
