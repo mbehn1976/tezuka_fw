@@ -447,9 +447,10 @@ Soak in this layout (iiod on core 1, `cyclictest` on core 1, websocket load): 87
 - Cause (traces, sizes from untraced runs): the `cyclictest` timer interrupt lands while the iiod writer thread is inside `sys_io_submit` -> `tcp_sendmsg` -> `tcp_gso_segment` -> `skb_segment` -> `kmalloc` -> `___slab_alloc`, which runs with interrupts off.
   iiod's TCP transmit path on the isolated core is what lifts the max from 44 to 47 us (iiod on core 0) to 80 to 112 us.
 - iiod at SCHED_RR 99 on core 1 is unusable together with an RT task there: `cyclictest` max 63 ms and 88 ms (avg 120 us). The stream stays clean.
-- **Bug in the start script.** `S23udc` chooses its iiod start line with `NB_CORE=$(nproc)`; under `isolcpus=1` `nproc` reports 1 (it honours the affinity mask), so the single-core branch runs: iiod starts SCHED_OTHER and unpinned (the default mask excludes the isolated core, i.e. core 0).
-  All isolcpus tests above therefore used a SCHED_OTHER iiod that my scripts pinned at runtime with `taskset -p`; on non-isolcpus boots the `chrt -r 99 taskset -c 1` branch does run (earlier sections 11 and 14 are unaffected).
-  Proposed fix (NOT applied, to be reviewed): count cores from `/sys/devices/system/cpu/present` or `grep -c ^processor /proc/cpuinfo` instead of `nproc`, and for an isolcpus layout add an explicit `taskset -c <core>` without the `chrt -r 99`.
+- **Start script (`S23udc`), fixed in `dbb9f48`.** It chose its iiod start line with `NB_CORE=$(nproc)`; under `isolcpus=1` `nproc` reports 1 (it honours the affinity mask), so the single-core branch ran: iiod started SCHED_OTHER and unpinned (the default mask excludes the isolated core, i.e. core 0).
+  That accidentally gave layout A. All isolcpus tests above therefore used a SCHED_OTHER iiod that my scripts pinned at runtime with `taskset -p` (on boots without isolcpus the `chrt -r 99 taskset -c 1` branch runs; sections 11 and 14 are unaffected).
+  The hazard was the reverse: a core-count-only fix would put SCHED_RR 99 iiod on the isolated core (63 to 88 ms starvation, above). The commit counts CPUs from `/proc/cpuinfo`, reads `/sys/devices/system/cpu/isolated`, and starts a plain iiod when cores are isolated (it stays on the housekeeping core through the default mask); boots without `isolcpus=` are unchanged.
+  Hardware-verified on the Pluto+ (image `known_good/sdimg-rt21-s23fix-iso`: iiod and its threads on core 0, SCHED_OTHER; `known_good/sdimg-rt21-s23fix`, no isolcpus: threads on core 1, SCHED_RR 99).
 
 ### 16f. Open: RX stream wedge and iiod deaths (cause unknown)
 - RX wedge (twice): `Unable to dequeue block: Connection timed out (110)` on both the network and the local reader, iiod alive, AD9361 state and clocks fine; after the combined stressor load and after the placement variant with iiod on the hog's core. Cured by an ssh `reboot`.
@@ -486,7 +487,7 @@ A first run of this test was invalid and is not used: the soak's board-side moni
 Not tried (each needs more than a runtime setting): jumbo frames (host NIC and root on the host), a smaller iiod send size (iiod change), shorter irq-off sections in the slab allocator (kernel change).
 
 ### 16h. Next steps (replaces the RT items of section 15)
-1. Decide the shipped layout (A or B) and fix `S23udc` (16e): firmware change, ask before making it, then hardware-verify on the Pluto+.
+1. Decide the shipped layout (A or B). `S23udc` is fixed and verified (16e); the isolation itself is still a boot-args choice (`isolcpus=1 irqaffinity=0` on the sdboot_ram line of `uboot-env.txt`), not yet a switch.
 2. Overnight soak with the shipped `-D` iiod and a board-side watcher (to catch an iiod death and the RX wedge); find the wedge cause (DMA IRQ counters, AD9361 and PL FIFO state at the moment of the stall).
 3. Reduce the iiod transmit-path cost on core 1: runtime settings (GSO off, TCP output limit) did not help (16i); left are jumbo frames, a smaller iiod send size and kernel slab changes.
 4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
