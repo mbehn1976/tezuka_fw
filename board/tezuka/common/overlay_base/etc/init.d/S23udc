@@ -9,7 +9,10 @@ IIOD_OPTS="-D -n $ENDPOINTS -F /dev/iio_ffs"
 UDC_HANDLE_SUSPEND=$(fw_printenv -n udc_handle_suspend 2> /dev/null || echo 0 | tr -cd '[a-zA-Z0-9]._-')
 USB_ETH_MODE=$(fw_printenv -n usb_ethernet_mode 2> /dev/null || echo rndis | tr -cd '[a-zA-Z0-9]._-')
 AUDIO_MODE=$(fw_printenv -n audio_mode 2> /dev/null || echo off | tr -cd '[a-zA-Z0-9]._-')
-NB_CORE=$(nproc 2> /dev/null || echo 1)
+# nproc honours the affinity mask, which leaves out cores removed with isolcpus=, so count the CPUs in /proc/cpuinfo
+NB_CORE=$(grep -c '^processor' /proc/cpuinfo 2> /dev/null || echo 1)
+# cores taken out of the scheduler with isolcpus= (empty when there are none)
+ISOLATED_CPUS=$(cat /sys/devices/system/cpu/isolated 2> /dev/null)
 #serial should be set in /etc/serial
 ETCSERIAL=$(cat /etc/serial | tr -cd '[a-zA-Z0-9]._-')
 [ "$ETCSERIAL" = "" ] && ETCSERIAL="tezukafw" && printf "Serial missing in /etc/serial. Using serial: tezukafw "
@@ -170,11 +173,13 @@ if [ "$AUDIO_MODE" = "on" ]
 	mount iio_ffs -t functionfs /dev/iio_ffs 2> /dev/null
 	if grep -q dma_test_skip /proc/cmdline; then
 		echo "Skipping iiod start (dma_test_skip on cmdline)"
-	elif [ "$NB_CORE" = "2" ]
+	elif [ "$NB_CORE" = "2" ] && [ -z "$ISOLATED_CPUS" ]
 	then
 		# shellcheck disable=SC2086
 		start-stop-daemon -S -b -q -m -p /var/run/iiod.pid -x /usr/bin/chrt -- -r 99 /usr/bin/taskset -c 1 /usr/sbin/iiod $IIOD_OPTS
 	else
+		# one CPU, or isolcpus=: plain iiod. The default affinity mask leaves out the isolated cores, so it stays on the
+		# housekeeping core and at normal priority; SCHED_RR 99 on an isolated core starves the real-time task there.
 		# shellcheck disable=SC2086
 		start-stop-daemon -S -b -q -m -p /var/run/iiod.pid -x  /usr/sbin/iiod  -- $IIOD_OPTS
 	fi
