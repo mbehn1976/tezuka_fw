@@ -467,9 +467,27 @@ Soak in this layout (iiod on core 1, `cyclictest` on core 1, websocket load): 87
 The RT kernel itself cuts the worst case from 220 to 265 us (non-RT) to 65 to 110 us; getting below 50 us needs layout A (or an RT task that does not share a core with the network transmit path).
 Stream integrity at 10 MS/s needs 32 blocks (section 14h to 14j) in both layouts. Above 12.5 MS/s the Ethernet link itself is the limit (section 14j).
 
+### 16i. Can the iiod transmit cost on core 1 be reduced with runtime settings? No (2026-10-29, hardware-measured)
+
+Layout B (iiod SCHED_OTHER on core 1, Ethernet IRQ and services on core 0, `/waterfall` websocket load), `cyclictest -p98 -a1 -i250 -h 400` for 300 s per case (1.2 million samples), 25 stream rounds at 10 MS/s with 32 blocks per case, board checked for stray processes first.
+The Pluto+ GEM has no TCP segmentation offload (`ethtool -k eth0`: `tx-tcp-segmentation: off [fixed]`), so the kernel segments in software (`skb_segment`, seen in the traces of 16e).
+
+| Case | max (us) | avg (us) | samples >= 50 us | samples >= 80 us | stream |
+|---|---|---|---|---|---|
+| baseline | 126 | 26 | 0.99% | 800 | clean |
+| `ethtool -K eth0 gso off` | 112 | 28 | 7.60% | 672 | clean |
+| `tcp_limit_output_bytes` 1 MB -> 64 KB | 94 | 25 | 0.89% | 49 | clean |
+| gso off + 64 KB | 104 | 29 | 4.26% | 479 | clean |
+| baseline repeat | 128 | 26 | 1.00% | 50 | clean |
+
+Reading: the two baselines agree on the share of cycles over 50 us (0.99% and 1.00%) but differ 16-fold in the count over 80 us, so the max and the >= 80 us count are noise and the >= 50 us share is the usable metric.
+GSO off makes the tail worse (4 to 8% over 50 us; the same segmentation work is done as many small packets on core 1), the 64 KB output limit changes nothing. Nothing came near the 44 to 47 us of layout A. iiod stayed alive and the stream stayed clean in every case.
+A first run of this test was invalid and is not used: the soak's board-side monitor (`soak_mon.sh`) was still running `cyclictest` segments on core 1, so every case had a second `cyclictest` on the same core. Kill it after a soak.
+Not tried (each needs more than a runtime setting): jumbo frames (host NIC and root on the host), a smaller iiod send size (iiod change), shorter irq-off sections in the slab allocator (kernel change).
+
 ### 16h. Next steps (replaces the RT items of section 15)
 1. Decide the shipped layout (A or B) and fix `S23udc` (16e): firmware change, ask before making it, then hardware-verify on the Pluto+.
 2. Overnight soak with the shipped `-D` iiod and a board-side watcher (to catch an iiod death and the RX wedge); find the wedge cause (DMA IRQ counters, AD9361 and PL FIFO state at the moment of the stall).
-3. Reduce the iiod transmit-path cost on core 1 (TSO/GSO off, socket buffer sizes, packet size) and re-measure layout B.
+3. Reduce the iiod transmit-path cost on core 1: runtime settings (GSO off, TCP output limit) did not help (16i); left are jumbo frames, a smaller iiod send size and kernel slab changes.
 4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
 5. Linux 7.3 only after the final tag (section 3, stage 3); the RT result on 6.12 above is the baseline to beat.
