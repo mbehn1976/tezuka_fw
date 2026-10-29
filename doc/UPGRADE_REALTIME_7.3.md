@@ -500,8 +500,21 @@ Load: the board's stock services; "waterfall load" = two `/waterfall` websockets
 iiod stayed alive in both stream phases. Reading: the isolated core meets 50 us with the shipped start script, matching the hand-pinned runs of 16b (44 to 47 us). The network stream, however, already loses blocks with only the waterfall websockets on core 0 (16c and the first version of 16g said "only when core 0 is loaded"; the waterfall load is enough).
 So layout A suits on-board processing (the I/Q path in maia-hdl and local processing is not affected) or a dedicated RT mode with the web UI closed; for a clean Ethernet stream next to the web UI only layout B held (16d, 440-round soak), at 80 to 139 us. Not tested on this image: the original Pluto, a longer soak, the CPU-hog-free stream without the waterfall load (16b/16c ran it without websockets).
 
+### 16k. How to switch the RT mode (layout A) on (2026-10-29, hardware-verified on the Pluto+ SD boot)
+
+The default boot is unchanged (no `isolcpus`, iiod SCHED_RR 99 on core 1). To boot the isolated-core layout (A) add one line to `uEnv.txt` on the SD card (FAT partition):
+
+```
+rt_isolcpus=1
+```
+
+`sdboot_ram` (`board/tezuka/common/uboot-env.txt`) then adds `isolcpus=1 irqaffinity=0` to the kernel command line, and the fixed `S23udc` (16e) starts iiod plain on core 0. Remove the line to go back.
+Check after boot: `cat /sys/devices/system/cpu/isolated` prints `1`, `taskset -p <iiod tid>` shows mask 1 and `chrt -p` SCHED_OTHER; without the line the file is empty and iiod runs SCHED_RR 99 with mask 2.
+Do not use `fw_setenv` for this: on the Pluto+ it writes the QSPI environment. Only the SD RAM boot path has the switch (QSPI, USB and Kuiper boots are unchanged). Images used for the check: `known_good/sdimg-rt21-sw` (default) and `sdimg-rt21-sw-on` (same plus the line).
+Layout A suits an RT task that needs under 50 us while the web UI and Ethernet streaming stay idle (16j); latency and stream were measured on the image with the identical kernel and `S23udc`, not repeated on these two images.
+
 ### 16h. Next steps (replaces the RT items of section 15)
-1. Decide the shipped layout (A or B). `S23udc` is fixed and verified (16e); the isolation itself is still a boot-args choice (`isolcpus=1 irqaffinity=0` on the sdboot_ram line of `uboot-env.txt`), not yet a switch.
+1. Decide the shipped layout (A or B). `S23udc` is fixed and verified (16e); the isolation is now an opt-in switch (`rt_isolcpus=1` in `uEnv.txt`, 16k).
 2. Overnight soak with the shipped `-D` iiod and a board-side watcher (to catch an iiod death and the RX wedge); find the wedge cause (DMA IRQ counters, AD9361 and PL FIFO state at the moment of the stall).
 3. Reduce the iiod transmit-path cost on core 1: runtime settings (GSO off, TCP output limit) did not help (16i); left are jumbo frames, a smaller iiod send size and kernel slab changes.
 4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
