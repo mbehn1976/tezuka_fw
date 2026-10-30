@@ -538,7 +538,7 @@ Setup: 10 MS/s stream over Ethernet with 32 blocks (5 s rounds), two web UI wate
 2. The overnight soak of the default mode ran clean (16l); the wedge is a stale iiod client session (16f); find what hangs the session (iiod thread dump and a network capture at the stall) and whether the default mode can hit it.
 3. Reduce the iiod transmit-path cost on core 1: runtime settings (GSO off, TCP output limit) did not help (16i); left are jumbo frames, a smaller iiod send size and kernel slab changes.
 4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
-5. Linux 7.3: the rc7 bring-up and latency baseline are in section 17 (equal to 6.12 within noise). Before 7.3 is usable: port the ADI drivers, decide the QSPI handling for the 32 MiB flash, boot the corrected USB PHY device tree, then re-pin to the final tag.
+5. Linux 7.3: the rc7 bring-up and latency baseline are in section 17 (equal to 6.12 within noise). Before 7.3 is usable: port the ADI drivers, decide the QSPI handling for the 32 MiB flash, then re-pin to the final tag (the USB PHY device tree is verified, 17e).
 
 
 ## 17. Linux 7.3.0-rc7 on the Pluto+: bring-up and latency baseline (2026-10-30, hardware-measured unless marked as read from source)
@@ -557,7 +557,7 @@ Setup: 10 MS/s stream over Ethernet with 32 blocks (5 s rounds), two web UI wate
 |---|---|---|
 | Kernel, SD card, userspace | Boots to `/init`, `mmcblk0p1` mounts, `iiod`, `dropbear`, `mosquitto` run | works |
 | Ethernet | `macb` finds the Cadence GEM and the RTL8211E, link 1 Gbps full duplex. A transmit watchdog timeout (5 to 6 s) appeared once around the first link-up in 3 of the 4 fully captured boots and the queue recovered each time; the 6.12 board shows none | works, watchdog line unexplained |
-| USB gadget | 7.3 ChipIdea does not read `usb-phy` or `xlnx,phy-reset-gpio`; it finds the PHY through `phys` (without it the probe ends silently with -ENXIO "no USB PHY"). Needs a `usb-nop-xceiv` node, `phys = <&usb_phy0>` on `&usb0` and `CONFIG_NOP_USB_XCEIV=y`. The reset must be active low: `reset-gpios = <&gpio0 46 1>`. With flag 0 the generic PHY driver leaves MIO46 low and the USB3320 stays in reset: the UDC binds, its state stays `powered`, `USBSTS` is 0, the ULPI viewport hangs and the host sees nothing | Live test: releasing the pin by hand and rebinding the UDC made `PlutoSDR`, the 30 MiB `TEZUKA` drive, RNDIS and ACM appear on the host. The corrected device tree (flag 1) is built but not yet booted without the manual release |
+| USB gadget | 7.3 ChipIdea does not read `usb-phy` or `xlnx,phy-reset-gpio`; it finds the PHY through `phys` (without it the probe ends silently with -ENXIO "no USB PHY"). Needs a `usb-nop-xceiv` node, `phys = <&usb_phy0>` on `&usb0` and `CONFIG_NOP_USB_XCEIV=y`. The reset must be active low: `reset-gpios = <&gpio0 46 1>`. With flag 0 the generic PHY driver leaves MIO46 low and the USB3320 stays in reset: the UDC binds, its state stays `powered`, `USBSTS` is 0, the ULPI viewport hangs and the host sees nothing | Live test: releasing the pin by hand and rebinding the UDC made `PlutoSDR`, the 30 MiB `TEZUKA` drive, RNDIS and ACM appear on the host. The corrected device tree (flag 1) enumerates the same devices at boot with no manual release (17e) |
 | QSPI flash | The flash is 32 MiB. Mainline `spi-zynq-qspi` rejects 4-byte addresses, and the 7.3 `spi-nor` core needs them above 16 MiB, so no read mode is left: "can't select read settings supported by both the SPI controller and memory", probe -22, no `/dev/mtd*`. The 6.12 ADI/Xilinx `spi-nor` core has extra code for `xlnx,zynq-qspi-1.0` that keeps 3-byte addressing and switches banks with the extended address register (read from source). The 7.3 controller driver also writes the address bytes through `xqspi->txbuf` into the `op` structure (read from source) | not fixed |
 | Network address | With no QSPI, `fw_printenv` fails, `ipaddr_eth` is empty and `S40network` configures `eth0` for DHCP, `usb0` stays 192.168.2.1. So 192.168.3.1 and 192.168.4.1 are missing. The test ramdisk sets 192.168.3.1 by hand (`S99dbgnet`) | consequence of the QSPI item |
 | ADI drivers | No `ad9361`, `cf_axi_*`, so no `iio:device0` and no streaming. `watchdatveasy.sh` and `watchconsolefreq.sh` then spin in a tight `inotifywait` loop and use most of the CPU, so they were stopped for the baseline | to port |
@@ -578,3 +578,21 @@ Options for QSPI: (1) port the Xilinx bank-switching code of the 6.12 tree into 
 - The shipped services move the tail more than the kernel does: the idle p99 is 53 us as shipped and 24 us reduced; `classifier` alone uses about 20 % CPU.
 - No `BUG`, `WARN`, hung task or RCU stall on either kernel. Neither kernel gets below 50 us worst case without isolating a core (16b); the `isolcpus` layout was not measured on 7.3.
 - Not covered: no streaming and no AD9361 on 7.3, so nothing here says anything about lost blocks. Logs and scripts: `hwtest/session-2026-10-25-rt/logs/k73_baseline_2026-10-30/` and `k612_baseline_2026-10-30/` (each with a `SUMMARY.txt`), `scripts/ct_summarize.py`.
+
+### 17e. Isolated core (`isolcpus=1 irqaffinity=0`) on 7.3.0-rc7 against 6.12.114-rt21 layout A (2026-10-30, hardware-measured)
+Same board, same script and phases as 17d, `cyclictest` on the isolated core 1 (`-a1`), 5 minutes and 1.2 million samples per phase. 7.3 image: `known_good/sdimg-k73rc7-iso` (the default image with the 7.3 `uImage`, the device tree with the corrected USB PHY reset, and a ramdisk that sets `eth0` to 192.168.3.1 and stops the `watch*` loops). 6.12 image: `known_good/sdimg-rt21-sw-on`. The extra services (`classifier`, `maia-httpd`, `api_controller.sh` with MQTT, the `watch*` scripts) were stopped on 6.12 to match the 7.3 service set. Both: `isolated=[1]`, `iiod` SCHED_OTHER on core 0, stressors on core 0 only. Times in us.
+
+| Phase | Kernel | min | avg | max | p99 | p99.9 | p99.99 | >50 | >100 |
+|---|---|---|---|---|---|---|---|---|---|
+| idle | 6.12 layout A | 9 | 11 | 37 | 17 | 27 | 30 | 0 | 0 |
+| idle | 7.3-rc7 | 11 | 12 | 39 | 17 | 28 | 32 | 0 | 0 |
+| cpu2 | 6.12 layout A | 9 | 11 | 39 | 18 | 27 | 31 | 0 | 0 |
+| cpu2 | 7.3-rc7 | 11 | 12 | 44 | 19 | 28 | 32 | 0 | 0 |
+| heavy | 6.12 layout A | 10 | 13 | 49 | 24 | 29 | 35 | 0 | 0 |
+| heavy | 7.3-rc7 | 11 | 14 | 61 | 26 | 32 | 39 | 11 | 0 |
+
+- Isolating core 1 cuts the 7.3 tail from 62, 65 and 117 us (17d, no isolation) to 39, 44 and 61 us. The 50 us goal is met on 7.3 at idle and under `--cpu 2`; in the heavy phase 11 of 1.2 million samples exceed it (maximum 61 us). On 6.12 layout A the goal is met in all three phases (heavy maximum 49 us).
+- 7.3 runs 2 to 5 us above 6.12 at every percentile and phase. That is small, comes from single 5 minute runs and rare samples, and the 7.3 build carries extra options (`DYNAMIC_DEBUG`, `NETCONSOLE`, debug prints). Repeat the 7.3 heavy phase before reading anything into the 12 us gap.
+- Not covered: no streaming and no AD9361 on 7.3, so the layout A problem (lost blocks with network load on core 0, 16c and 16j) cannot be compared. The conclusion of 16g stands.
+- The corrected USB PHY device tree (`reset-gpios = <&gpio0 46 1>`) was booted without any manual pin release in this run: the `PlutoSDR` and the 30 MiB `TEZUKA` drive enumerate on the host from boot. This closes the open point in 17c.
+- Logs: `hwtest/session-2026-10-25-rt/logs/k73_isolcpus_2026-10-30/` and `k612_isolcpus_2026-10-30/` (each with a `SUMMARY.txt`).
