@@ -456,6 +456,7 @@ Soak in this layout (iiod on core 1, `cyclictest` on core 1, websocket load): 87
 - RX wedge (twice): `Unable to dequeue block: Connection timed out (110)` on both the network and the local reader, iiod alive, AD9361 state and clocks fine; after the combined stressor load and after the placement variant with iiod on the hog's core. Cured by an ssh `reboot`.
 - iiod died twice without a trace (board up for 11 h and 35 min; no oom/segv/dmesg line; the `local:` backend liveness check does not need iiod and hid it the first time).
   A foreground catcher (`scripts/iiod_wrap.sh`, core dumps on) saw no death in about 580 stream rounds / 2 hours of soaks, including the memory-stressor and event-trace cases that preceded the deaths. Not reproduced.
+- Wedge hunt on the default image (2026-10-30, `scripts/wedge_hunt.sh`, hardware-measured): web UI load plus the 10 MS/s 32-block stream under escalating `stress-ng` (`--cpu 2`; `--cpu 2 --vm 2`; `--cpu 4 --vm 2 --hdd 1`, load average up to about 10.8): 135 rounds, 0 incomplete, 0 with lost blocks, iiod alive. No wedge, so the DMA and interrupt capture armed for the first stall never fired. Both wedges above came on isolcpus or pinned layouts where iiod ran SCHED_OTHER, not in the shipped mode, but this is not proven; the cause stays unknown.
 - A memory stressor on core 0 breaks the stream (30 to 35 outliers per round) even with iiod on core 1; a CPU hog does not. That is DDR bandwidth, not scheduling.
 
 ### 16g. Conclusion: two layouts, no layout with both goals on this dual-core Zynq 7010
