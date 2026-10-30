@@ -525,6 +525,7 @@ Setup: 10 MS/s stream over Ethernet with 32 blocks (5 s rounds), two web UI wate
 - P1: iiod stayed alive for the whole run (no repeat of the earlier deaths, 16f). `cyclictest -p98 -a0` max per 600 s segment: 343 to 691 us over 24 segments. The stream is clean, but core 0 carries all the housekeeping, so this mode gives no 50 us guarantee.
 - P2: every round lost blocks with only the web UI load, the same result as layout A in 16c and 16j. No `cyclictest` segment completed, so no latency number for this phase. iiod was alive and the placement was as intended.
 - Consequence: the opt-in switch (16k) is only for an RT task that runs while the web UI and Ethernet streaming are idle. The default stays the safe mode for streaming.
+- After the soak the default image `sdimg-rt21-sw` was written back to the SD (checksums matched, board in default mode: no isolcpus, iiod SCHED_RR 99, mask 2) and a short stream check was run: 30 rounds of 5 s at 10 MS/s over Ethernet, 32 blocks, no web UI load: 30 complete, 0 with lost blocks.
 - Not covered: deaths outside streaming, the shipped iiod cannot record an exit signal, the RX wedge (16f) did not occur. Logs: `hwtest/session-2026-10-25-rt/logs/overnight_2026-10-29/`.
 
 ### 16h. Next steps (replaces the RT items of section 15)
