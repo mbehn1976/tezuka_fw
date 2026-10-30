@@ -513,9 +513,23 @@ Check after boot: `cat /sys/devices/system/cpu/isolated` prints `1`, `taskset -p
 Do not use `fw_setenv` for this: on the Pluto+ it writes the QSPI environment. Only the SD RAM boot path has the switch (QSPI, USB and Kuiper boots are unchanged). Images used for the check: `known_good/sdimg-rt21-sw` (default) and `sdimg-rt21-sw-on` (same plus the line).
 Layout A suits an RT task that needs under 50 us while the web UI and Ethernet streaming stay idle (16j); latency and stream were measured on the image with the identical kernel and `S23udc`, not repeated on these two images.
 
+### 16l. Overnight soak of both modes (2026-10-29/30, hardware-measured, images `known_good/sdimg-rt21-sw` and `sdimg-rt21-sw-on`)
+
+Setup: 10 MS/s stream over Ethernet with 32 blocks (5 s rounds), two web UI waterfall websockets plus API polling at 5 Hz, `cyclictest` in 600 s segments. The harness stops at the first problem (iiod gone, incomplete round, client ended) and leaves the board as is.
+
+| Phase | Image | Duration | Rounds | Incomplete | Rounds with lost blocks |
+|---|---|---|---|---|---|
+| P1 default | `sdimg-rt21-sw` (no isolcpus, iiod SCHED_RR 99, mask 2) | 14457 s | 1338 | 0 | 0 |
+| P2 `rt_isolcpus=1` | `sdimg-rt21-sw-on` (isolated=1, iiod SCHED_OTHER, mask 1) | stopped at 376 s | 16 | 0 | 16 (23 to 49 of 191 blocks per round) |
+
+- P1: iiod stayed alive for the whole run (no repeat of the earlier deaths, 16f). `cyclictest -p98 -a0` max per 600 s segment: 343 to 691 us over 24 segments. The stream is clean, but core 0 carries all the housekeeping, so this mode gives no 50 us guarantee.
+- P2: every round lost blocks with only the web UI load, the same result as layout A in 16c and 16j. No `cyclictest` segment completed, so no latency number for this phase. iiod was alive and the placement was as intended.
+- Consequence: the opt-in switch (16k) is only for an RT task that runs while the web UI and Ethernet streaming are idle. The default stays the safe mode for streaming.
+- Not covered: deaths outside streaming, the shipped iiod cannot record an exit signal, the RX wedge (16f) did not occur. Logs: `hwtest/session-2026-10-25-rt/logs/overnight_2026-10-29/`.
+
 ### 16h. Next steps (replaces the RT items of section 15)
 1. Decide the shipped layout (A or B). `S23udc` is fixed and verified (16e); the isolation is now an opt-in switch (`rt_isolcpus=1` in `uEnv.txt`, 16k).
-2. Overnight soak with the shipped `-D` iiod and a board-side watcher (to catch an iiod death and the RX wedge); find the wedge cause (DMA IRQ counters, AD9361 and PL FIFO state at the moment of the stall).
+2. The overnight soak of the default mode ran clean (16l); find the wedge cause (DMA IRQ counters, AD9361 and PL FIFO state at the moment of the stall).
 3. Reduce the iiod transmit-path cost on core 1: runtime settings (GSO off, TCP output limit) did not help (16i); left are jumbo frames, a smaller iiod send size and kernel slab changes.
 4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
 5. Linux 7.3 only after the final tag (section 3, stage 3); the RT result on 6.12 above is the baseline to beat.
