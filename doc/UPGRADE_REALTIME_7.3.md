@@ -1,4 +1,4 @@
-# Linux 7.x and PREEMPT_RT on the Pluto+ (plan, state 2026-10-25; RT track results in section 16, 2026-10-29)
+# Linux 7.x and PREEMPT_RT on the Pluto+ (plan, state 2026-10-25; RT track results in section 16, 2026-10-29; 7.3-rc7 bring-up in section 17, 2026-10-30)
 
 Goal: deterministic latency (worst case below 50 us) and no I/Q buffer drops on the Pluto+, starting from `dev/next`
 (= `upgrade/all-features` 32c3a90: Buildroot 2026.08.1, kernel 6.12.114, libiio 1.0.0, maia-sdr 415cea9).
@@ -538,4 +538,43 @@ Setup: 10 MS/s stream over Ethernet with 32 blocks (5 s rounds), two web UI wate
 2. The overnight soak of the default mode ran clean (16l); the wedge is a stale iiod client session (16f); find what hangs the session (iiod thread dump and a network capture at the stall) and whether the default mode can hit it.
 3. Reduce the iiod transmit-path cost on core 1: runtime settings (GSO off, TCP output limit) did not help (16i); left are jumbo frames, a smaller iiod send size and kernel slab changes.
 4. `nohz_full`/`rcu_nocbs` kernel rebuild only if layout A needs below 44 us; original Pluto RT image and USB gadget under RT are untested.
-5. Linux 7.3 only after the final tag (section 3, stage 3); the RT result on 6.12 above is the baseline to beat.
+5. Linux 7.3: the rc7 bring-up and latency baseline are in section 17 (equal to 6.12 within noise). Before 7.3 is usable: port the ADI drivers, decide the QSPI handling for the 32 MiB flash, boot the corrected USB PHY device tree, then re-pin to the final tag.
+
+
+## 17. Linux 7.3.0-rc7 on the Pluto+: bring-up and latency baseline (2026-10-30, hardware-measured unless marked as read from source)
+
+### 17a. Setup and method
+- Kernel: `v7.3-rc7` (tarball from git.kernel.org/torvalds/t, 270 MB), built outside the repo with the Buildroot `arm-linux-gcc` 15.1 of `output/plutoplus_rt`. Config: the resolved 6.12 RT `.config` plus `olddefconfig`; `PREEMPT_RT=y` (`ARCH_SUPPORTS_RT` is selected for ARM), `HZ=1000`, CMA 64 MB kept. The device tree is `zynq-plutoplus.dts` of this repo on top of the ADI `zynq.dtsi` and `zynq-7000.dtsi` (mainline has no `zynq.dtsi`). Image: `uImage` with `LOADADDR=0x8000`.
+- Test images are the default image with the 7.3 `uImage` and `devicetree.dtb` swapped in (`known_good/sdimg-k73rc7-*`). The default image `sdimg-rt21-sw` was written back and verified (`/boot` checksums match, 6.12.114-rt21, no isolcpus). Nothing was pushed and no QSPI flash was written.
+- No UART was available, so the boot log was read two ways: netconsole over Ethernet (`CONFIG_NETCONSOLE`, `log_buf_len=4M` so the early lines replay) and a small debug init script appended to the ramdisk as a second cpio archive. It copies `dmesg`, the process list and driver state to the FAT partition of the SD card. A control run on the 6.12 kernel proved the script and the appended archive work. Driver debug came from `*.dyndbg=+p` on the kernel command line and a few temporary prints in a scratch copy of `ci_hdrc` `core.c`, `spi-nor` `core.c` and `spi-zynq-qspi.c` (not kept).
+
+### 17b. Config difference 6.12 to 7.3
+133 differing symbols. The relevant ones are the out-of-tree drivers that 7.3 does not have: `AD9361`, `AD9361_EXT_BAND_CONTROL`, `CF_AXI_ADC`, `CF_AXI_DDS`, `ADI_IIO_FAKEDEV`, `COMMON_CLK_ADI`, `IIO_DMA_BUF_MMAP_LEGACY`, plus `XILINX_RESET_CODE`, `UIO_XILINX_APM` and `OF_CONFIGFS`. `MDIO_BUS`, `MDIO_DEVRES` and `USB_PHY` became hidden symbols that other drivers select. The USB gadget, ChipIdea, ULPI, Cadence GEM, Realtek PHY, MTD and SPI settings are identical, so no config setting explains the problems below. List: `hwtest/session-2026-10-25-rt/logs/k73_config_diff_6.12_vs_7.3.txt`.
+
+### 17c. What works and what does not (7.3.0-rc7 boot on the Pluto+)
+
+| Item | Finding | State |
+|---|---|---|
+| Kernel, SD card, userspace | Boots to `/init`, `mmcblk0p1` mounts, `iiod`, `dropbear`, `mosquitto` run | works |
+| Ethernet | `macb` finds the Cadence GEM and the RTL8211E, link 1 Gbps full duplex. A transmit watchdog timeout (5 to 6 s) appeared once around the first link-up in 3 of the 4 fully captured boots and the queue recovered each time; the 6.12 board shows none | works, watchdog line unexplained |
+| USB gadget | 7.3 ChipIdea does not read `usb-phy` or `xlnx,phy-reset-gpio`; it finds the PHY through `phys` (without it the probe ends silently with -ENXIO "no USB PHY"). Needs a `usb-nop-xceiv` node, `phys = <&usb_phy0>` on `&usb0` and `CONFIG_NOP_USB_XCEIV=y`. The reset must be active low: `reset-gpios = <&gpio0 46 1>`. With flag 0 the generic PHY driver leaves MIO46 low and the USB3320 stays in reset: the UDC binds, its state stays `powered`, `USBSTS` is 0, the ULPI viewport hangs and the host sees nothing | Live test: releasing the pin by hand and rebinding the UDC made `PlutoSDR`, the 30 MiB `TEZUKA` drive, RNDIS and ACM appear on the host. The corrected device tree (flag 1) is built but not yet booted without the manual release |
+| QSPI flash | The flash is 32 MiB. Mainline `spi-zynq-qspi` rejects 4-byte addresses, and the 7.3 `spi-nor` core needs them above 16 MiB, so no read mode is left: "can't select read settings supported by both the SPI controller and memory", probe -22, no `/dev/mtd*`. The 6.12 ADI/Xilinx `spi-nor` core has extra code for `xlnx,zynq-qspi-1.0` that keeps 3-byte addressing and switches banks with the extended address register (read from source). The 7.3 controller driver also writes the address bytes through `xqspi->txbuf` into the `op` structure (read from source) | not fixed |
+| Network address | With no QSPI, `fw_printenv` fails, `ipaddr_eth` is empty and `S40network` configures `eth0` for DHCP, `usb0` stays 192.168.2.1. So 192.168.3.1 and 192.168.4.1 are missing. The test ramdisk sets 192.168.3.1 by hand (`S99dbgnet`) | consequence of the QSPI item |
+| ADI drivers | No `ad9361`, `cf_axi_*`, so no `iio:device0` and no streaming. `watchdatveasy.sh` and `watchconsolefreq.sh` then spin in a tight `inotifywait` loop and use most of the CPU, so they were stopped for the baseline | to port |
+| Mainline `axi-dmac` | The RX and TX DMA interrupts (`7c400000.dma`, `7c420000.dma`) register | not exercised |
+
+Options for QSPI: (1) port the Xilinx bank-switching code of the 6.12 tree into the 7.3 `spi-nor` core and controller driver (verification needs flash writes, so only with a recovery path); (2) give the mainline driver 4-byte address support (the flash may then be left in a state that U-Boot or the BootROM does not expect after a reset); (3) skip QSPI and set the address by hand, as the test ramdisk does.
+
+### 17d. Latency baseline on 7.3.0-rc7 against 6.12.114-rt21 (same board, same script)
+`cyclictest -m -t1 -p98 -i250 -a1 -D 300 -q -h 5000`, 1.2 million samples per phase, no isolcpus. Phases: idle, `stress-ng --cpu 2`, and `stress-ng --cpu 4 --vm 2 --vm-bytes 96M --hdd 1 --hdd-bytes 32M`. A = 6.12 default image as shipped (`classifier`, `maia-httpd`, `api_controller.sh`, MQTT and the `watch*` scripts running). B = 6.12 with those services stopped, which is close to the service set of the 7.3 run. Times in us.
+
+| Kernel | idle max | idle p99.9 | idle p99.99 | idle >50 | cpu2 max | heavy max | heavy p99.99 | heavy >100 |
+|---|---|---|---|---|---|---|---|---|
+| 6.12.114-rt21, A (shipped) | 86 | 61 | 67 | 20496 | 82 | 82 | 71 | 0 |
+| 6.12.114-rt21, B (reduced) | 83 | 32 | 40 | 8 | 60 | 109 | 76 | 11 |
+| 7.3.0-rc7 RT (reduced) | 62 | 35 | 47 | 50 | 65 | 117 | 99 | 90 |
+
+- 7.3-rc7 and 6.12 are equal within the noise of single 5 minute runs; the maxima come from a handful of samples. Only the heavy phase is slightly worse on 7.3 (90 samples above 100 us against 11).
+- The shipped services move the tail more than the kernel does: the idle p99 is 53 us as shipped and 24 us reduced; `classifier` alone uses about 20 % CPU.
+- No `BUG`, `WARN`, hung task or RCU stall on either kernel. Neither kernel gets below 50 us worst case without isolating a core (16b); the `isolcpus` layout was not measured on 7.3.
+- Not covered: no streaming and no AD9361 on 7.3, so nothing here says anything about lost blocks. Logs and scripts: `hwtest/session-2026-10-25-rt/logs/k73_baseline_2026-10-30/` and `k612_baseline_2026-10-30/` (each with a `SUMMARY.txt`), `scripts/ct_summarize.py`.
