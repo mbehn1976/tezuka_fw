@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# Raise the timer softirq threads on Linux 7.x PREEMPT_RT
+#
+# ktimers/N run at SCHED_FIFO 1. On 7.x they contend with the Ethernet interrupt thread for the softirq lock, get
+# boosted by priority inheritance over and over and stall the network transmit; the I/Q stream then hands its blocks
+# back late and the DMA queue runs empty (doc/UPGRADE_REALTIME_7.3.md, 17g). At FIFO 99 the contention is short.
+# 6.x kernels are left alone (not measured there).
+#
+
+case "$1" in
+ start)
+	[ "$(uname -r | cut -d. -f1)" -ge 7 ] 2>/dev/null || exit 0
+	printf "Raising ktimers priority: "
+	n=0
+	for c in /proc/[0-9]*/comm; do
+		case "$(cat "$c" 2>/dev/null)" in
+		ktimers/*)
+			pid=${c#/proc/}
+			pid=${pid%/comm}
+			chrt -f -p 99 "$pid" > /dev/null 2>&1 && n=$((n + 1))
+			;;
+		esac
+	done
+	echo "$n threads"
+	;;
+  stop)
+	;;
+  restart|reload)
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit $?
