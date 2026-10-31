@@ -577,7 +577,7 @@ Options for QSPI: (1) port the Xilinx bank-switching code of the 6.12 tree into 
 - 7.3-rc7 and 6.12 are equal within the noise of single 5 minute runs; the maxima come from a handful of samples. Only the heavy phase is slightly worse on 7.3 (90 samples above 100 us against 11).
 - The shipped services move the tail more than the kernel does: the idle p99 is 53 us as shipped and 24 us reduced; `classifier` alone uses about 20 % CPU.
 - No `BUG`, `WARN`, hung task or RCU stall on either kernel. Neither kernel gets below 50 us worst case without isolating a core (16b); the `isolcpus` layout was not measured on 7.3.
-- Not covered: no streaming and no AD9361 on 7.3, so nothing here says anything about lost blocks. Logs and scripts: `hwtest/session-2026-10-25-rt/logs/k73_baseline_2026-10-30/` and `k612_baseline_2026-10-30/` (each with a `SUMMARY.txt`), `scripts/ct_summarize.py`.
+- Not covered here: no streaming and no AD9361 on 7.3 at this point (see 17f for the stream test after the ADI port). Logs and scripts: `hwtest/session-2026-10-25-rt/logs/k73_baseline_2026-10-30/` and `k612_baseline_2026-10-30/` (each with a `SUMMARY.txt`), `scripts/ct_summarize.py`.
 
 ### 17e. Isolated core (`isolcpus=1 irqaffinity=0`) on 7.3.0-rc7 against 6.12.114-rt21 layout A (2026-10-30, hardware-measured)
 Same board, same script and phases as 17d, `cyclictest` on the isolated core 1 (`-a1`), 5 minutes and 1.2 million samples per phase. 7.3 image: `known_good/sdimg-k73rc7-iso` (the default image with the 7.3 `uImage`, the device tree with the corrected USB PHY reset, and a ramdisk that sets `eth0` to 192.168.3.1 and stops the `watch*` loops). 6.12 image: `known_good/sdimg-rt21-sw-on`. The extra services (`classifier`, `maia-httpd`, `api_controller.sh` with MQTT, the `watch*` scripts) were stopped on 6.12 to match the 7.3 service set. Both: `isolated=[1]`, `iiod` SCHED_OTHER on core 0, stressors on core 0 only. Times in us.
@@ -596,3 +596,28 @@ Same board, same script and phases as 17d, `cyclictest` on the isolated core 1 (
 - Not covered: no streaming and no AD9361 on 7.3, so the layout A problem (lost blocks with network load on core 0, 16c and 16j) cannot be compared. The conclusion of 16g stands.
 - The corrected USB PHY device tree (`reset-gpios = <&gpio0 46 1>`) was booted without any manual pin release in this run: the `PlutoSDR` and the 30 MiB `TEZUKA` drive enumerate on the host from boot. This closes the open point in 17c.
 - Logs: `hwtest/session-2026-10-25-rt/logs/k73_isolcpus_2026-10-30/` and `k612_isolcpus_2026-10-30/` (each with a `SUMMARY.txt`).
+
+### 17f. ADI driver port to 7.3.0-rc7 and the I/Q stream (2026-10-30/31, hardware-measured on the Pluto+)
+
+**Port.** `ad9361`, `cf_axi_adc_core`, `cf_axi_dds` (with `buffer_stream`) and `clk-adjustable-rate` were taken from the ADI 6.12 tree and built into the scratch 7.3 tree. The build has 0 errors and 0 warnings. 7.x API changes that had to be handled: `of_gpio.h` is gone, clock `round_rate` became `determine_rate` (wrappers), `bin_attribute` callbacks take const, `write_event_config` takes a bool, `MODULE_IMPORT_NS` takes a string, `IIO_CHAN_INFO_CALIBPHASE` had to be added to the IIO core (with the name `calibphase`), `ADI_AXI_REG_ID` and related defines were added to `adi-axi-common.h`, and the `jesd204`, `clkscale` and dt-bindings headers were copied. The DDS buffer uses `devm_iio_dmaengine_buffer_setup_ext` without the ADI submit and abort hooks. Patch: `hwtest/session-2026-10-25-rt/k73_port/0001-adi-ad9361-axi-drivers-for-7.3-rc7.patch` (31 files, applies to a pristine rc7 in a dry run), with `README.txt`, the config and the device tree.
+
+**First boot on the Pluto+.** AD936x initialises, DDS and ADC probe as AD9364, `iiod` serves the libiio 1.0 client, RX at 10 MS/s works and TX with cyclic DMA works. The device order differs from 6.12: `iio:device0` is `xadc`, `device1` `ad9361-phy`, `device2` `cf-ad9361-dds-core-lpc`, `device3` `cf-ad9361-lpc` (on 6.12 `ad9361-phy` is `device0`). The DDS tone registers (0x400 to 0x44c) ignore writes in this FPGA design, so test tones must come through DMA.
+
+**Stream test.** AD9361 digital loopback plus a cyclic TX tone (1.25 MHz, DMA), RX at 10 MS/s over Ethernet with the libiio 1.0 host `iio_rwdev -b 262144`, a phase jump detector (512 sample blocks, jump above 0.4 rad), shuffled rounds of 5 s with a 3 s gap. Slips are counted, not whole lost blocks.
+
+| Case | Rounds | Rounds with slips | Slips |
+|---|---|---|---|
+| 6.12 default, 32 blocks | 20 | 0 | 0 |
+| 6.12 default, 4 blocks | 20 | 3 | 5 |
+| 7.3, no DMA heap, 32 blocks | 20 | 20 | 342 |
+| 7.3, no DMA heap, 4 blocks | 20 | 20 | 353 |
+| 7.3, `reserved` heap, 32 blocks | 30 | 2 | 5 (max 4 per round) |
+| 7.3, `reserved` heap, 4 blocks | 30 | 29 | 194 |
+
+- Without a DMA heap every round was bad. The slips sit exactly on 262144-sample block boundaries and the jumps are multiples of 90 degrees (2, 4 or 6 sample slips), so samples are lost at the hand-over between blocks, not whole blocks. The number of blocks made no difference.
+- A local capture on the board (no network) had 0 slips in about 1000 blocks, against 131 slips in 12 network captures in the same session. The RX DMA and kernel buffer are therefore fine and the loss is in the `iiod` and libiio read path.
+- Cause: `CONFIG_DMABUF_HEAPS` was off, so there was no `/dev/dma_heap` and libiio 1.0 fell back to `read()` with about 2 blocks. Fix: `DMABUF_HEAPS=y`, `DMABUF_HEAPS_SYSTEM=y`, `DMABUF_HEAPS_CMA=y` (heaps `system`, `reserved`, `default_cma_region`) and `LIBIIO_DMA_HEAP_PATH=reserved` for `iiod`. A second `iiod` (SCHED_RR 99 on core 1) with 32 blocks, 10 rounds: `reserved` 0 slips, `default_cma_region` 0, `system` 1 slip.
+- Result: 7.3 with the heap is close to 6.12 but not equal. At 32 blocks 28 of 30 rounds are clean (6.12: 20 of 20). At 4 blocks 7.3 is much worse (194 slips against 5), so the block count matters more on the new path. The residual 5 slips at 32 blocks need a longer run before they can be called real.
+- Not yet in the shipped path: the boot `iiod` still uses the default `system` heap, because `S23udc` was not changed. The firmware needs `LIBIIO_DMA_HEAP_PATH=reserved` there, or a different libiio default.
+- Setup difference: 7.3 ran with few services (no `classifier`, `maia-httpd`), 6.12 with the shipped set, which makes the 6.12 control the harder case. TX was tested only with the cyclic tone. `maia-kmod` and `maia-httpd` were not tried on 7.3, and QSPI is still open (17c).
+- Logs and tools: `hwtest/session-2026-10-25-rt/logs/k73_adi_stream_2026-10-30/` (`SUMMARY.txt`, `drop73_run1.log`, `drop612_run1.log`, `drop73_reserved.log`, `drop73.py`, `slip.py`, `tone.bin`). The saved port config predates the `DMABUF_HEAPS` options, which must be added.
