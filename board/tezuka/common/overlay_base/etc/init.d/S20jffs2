@@ -17,6 +17,8 @@ start() {
     if mount | grep -q mtd2; then
         return 0
     fi
+    # no QSPI partition (7.x kernel without QSPI support): S20fwenv keeps /mnt/jffs2 on the SD card
+    [ -e /dev/mtd2 ] || return 0
     printf "Mounting JFFS2 (/mnt/jffs2): "
     mkdir -p /mnt/jffs2
     if mount -t jffs2 /dev/mtd2 /mnt/jffs2 2>/dev/null; then

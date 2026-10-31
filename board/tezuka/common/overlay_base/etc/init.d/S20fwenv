@@ -1,29 +1,42 @@
 #!/bin/sh
 #
-# Keep the U-Boot environment in a file on the SD card when there is no QSPI flash environment
+# Keep the U-Boot environment and the JFFS2 data on the SD card when the QSPI flash cannot be read
 #
-# fw_printenv/fw_setenv read and write the environment through /etc/fw_env.config, which names /dev/mtd1 (QSPI flash).
-# A kernel that cannot read the QSPI flash (7.x so far, doc/UPGRADE_REALTIME_7.3.md 17c) has no /dev/mtd1; without an
-# environment the operator name, callsign, locator, network addresses and the other stored settings are lost at once.
-# Then /boot/uboot.env (128 KiB, on the FAT partition S20fat-mount mounts) serves as the environment instead.
-# This is not the environment U-Boot reads, so it does not change the boot. With /dev/mtd1 present nothing happens.
+# fw_printenv/fw_setenv read and write the environment through /etc/fw_env.config, which names /dev/mtd1 (QSPI flash),
+# and S22serial, the HTTPS certificates and others keep their files in /mnt/jffs2 (/dev/mtd2). A kernel that cannot
+# read the QSPI flash (7.x so far, doc/UPGRADE_REALTIME_7.3.md 17c) has neither device. Without them the operator name,
+# callsign, locator, network addresses and the other stored settings are lost at once, and the serial number (and with
+# it the USB MAC address) is regenerated at every boot.
+# Then /boot/uboot.env (128 KiB, on the FAT partition S20fat-mount mounts) serves as the environment, and
+# /boot/jffs2 is mounted on /mnt/jffs2. Neither is read by U-Boot, so the boot is unchanged. With /dev/mtd1 or
+# /dev/mtd2 present nothing happens for that part. The private key of the HTTPS certificate ends up on the FAT partition.
 #
 
 ENVFILE=/boot/uboot.env
+JFFS2DIR=/boot/jffs2
 
 case "$1" in
  start)
-	[ -e /dev/mtd1 ] && exit 0
-	printf "Environment in %s: " "$ENVFILE"
-	if ! mountpoint -q /boot 2> /dev/null; then
-		echo "SKIP (no /boot)"
+	if [ -e /dev/mtd1 ] && [ -e /dev/mtd2 ]; then
 		exit 0
 	fi
-	[ -f "$ENVFILE" ] || dd if=/dev/zero of="$ENVFILE" bs=131072 count=1 > /dev/null 2>&1
-	printf '%s 0x0000 0x20000 0x20000\n' "$ENVFILE" > /etc/fw_env.config
-	# an all-zero file has a bad CRC: write one variable so the file holds a valid environment from here on
-	fw_printenv -n tezuka_envfile > /dev/null 2>&1 || fw_setenv tezuka_envfile 1 > /dev/null 2>&1
-	fw_printenv -n tezuka_envfile > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+	if ! mountpoint -q /boot 2> /dev/null; then
+		echo "Environment and JFFS2 on SD: SKIP (no /boot)"
+		exit 0
+	fi
+	if [ ! -e /dev/mtd1 ]; then
+		printf "Environment in %s: " "$ENVFILE"
+		[ -f "$ENVFILE" ] || dd if=/dev/zero of="$ENVFILE" bs=131072 count=1 > /dev/null 2>&1
+		printf '%s 0x0000 0x20000 0x20000\n' "$ENVFILE" > /etc/fw_env.config
+		# an all-zero file has a bad CRC: write one variable so the file holds a valid environment from here on
+		fw_printenv -n tezuka_envfile > /dev/null 2>&1 || fw_setenv tezuka_envfile 1 > /dev/null 2>&1
+		fw_printenv -n tezuka_envfile > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+	fi
+	if [ ! -e /dev/mtd2 ]; then
+		printf "JFFS2 data in %s: " "$JFFS2DIR"
+		mkdir -p "$JFFS2DIR" /mnt/jffs2
+		mount -o bind "$JFFS2DIR" /mnt/jffs2 && echo "OK" || echo "FAIL"
+	fi
 	;;
   stop)
 	;;
