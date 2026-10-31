@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# Keep the U-Boot environment in a file on the SD card when there is no QSPI flash environment
+#
+# fw_printenv/fw_setenv read and write the environment through /etc/fw_env.config, which names /dev/mtd1 (QSPI flash).
+# A kernel that cannot read the QSPI flash (7.x so far, doc/UPGRADE_REALTIME_7.3.md 17c) has no /dev/mtd1; without an
+# environment the operator name, callsign, locator, network addresses and the other stored settings are lost at once.
+# Then /boot/uboot.env (128 KiB, on the FAT partition S20fat-mount mounts) serves as the environment instead.
+# This is not the environment U-Boot reads, so it does not change the boot. With /dev/mtd1 present nothing happens.
+#
+
+ENVFILE=/boot/uboot.env
+
+case "$1" in
+ start)
+	[ -e /dev/mtd1 ] && exit 0
+	printf "Environment in %s: " "$ENVFILE"
+	if ! mountpoint -q /boot 2> /dev/null; then
+		echo "SKIP (no /boot)"
+		exit 0
+	fi
+	[ -f "$ENVFILE" ] || dd if=/dev/zero of="$ENVFILE" bs=131072 count=1 > /dev/null 2>&1
+	printf '%s 0x0000 0x20000 0x20000\n' "$ENVFILE" > /etc/fw_env.config
+	# an all-zero file has a bad CRC: write one variable so the file holds a valid environment from here on
+	fw_printenv -n tezuka_envfile > /dev/null 2>&1 || fw_setenv tezuka_envfile 1 > /dev/null 2>&1
+	fw_printenv -n tezuka_envfile > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+	;;
+  stop)
+	;;
+  restart|reload)
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit 0
