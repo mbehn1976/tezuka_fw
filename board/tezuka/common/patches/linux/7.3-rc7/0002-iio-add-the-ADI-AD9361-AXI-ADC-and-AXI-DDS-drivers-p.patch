@@ -1,6 +1,6 @@
-From 106ee904bb6d041fc6123f16414568553628be62 Mon Sep 17 00:00:00 2001
+From 9debe3c8c87506b69aa495f1b707cdb88fe3e17b Mon Sep 17 00:00:00 2001
 From: Mario Behn <mario.behn@gmail.com>
-Date: Sat, 31 Oct 2026 14:27:43 +0100
+Date: Sat, 31 Oct 2026 15:06:57 +0100
 Subject: [PATCH 2/3] iio: add the ADI AD9361, AXI ADC and AXI DDS drivers,
  ported to 7.3
 
@@ -26,11 +26,19 @@ Changes for 7.x:
 - IIO core: add IIO_CHAN_INFO_CALIBPHASE (calibphase)
 - adi-axi-common.h: add ADI_AXI_REG_ID and related defines
 
+The source tree already carries two of the Tezuka patches on top of the
+ADI driver: 0002 extend_freq (AD9363 RF LO range 46.875 MHz to 6 GHz,
+ad9361_regs.h) and 0008 (the chip tables of other AXI DDS cores are
+left out unless CONFIG_CF_AXI_DDS_MULTICHIP is set). Both are part of
+these files.
+
 Tested on a Pluto+ (hardware): AD936x initialises, the DDS and ADC
 probe as AD9364, RX at 10 MS/s and cyclic TX work through iiod and
-libiio 1.0. Not covered: other ADI boards, MULTICHIP_SYNC, the other
-ADI 6.12 patches (extend_freq, ad5660, usb-ulpi-select-usb-phy,
-ssd130x, cf_axi_dds table gating).
+libiio 1.0, and the RX and TX LO can be set from 60 MHz to 6 GHz.
+Not covered: other ADI boards and MULTICHIP_SYNC. Not ported because
+the Pluto+ does not use them: the Microphase ad5660_mp and mpiio_io
+drivers (Tezuka patch 0004; only the e200, e310 and libre boards have
+device tree nodes for them), usb-ulpi-select-usb-phy and ssd130x.
 
 Signed-off-by: Mario Behn <mario.behn@gmail.com>
 ---

@@ -1,6 +1,6 @@
-From 3b961a96280b6a1a057c21c466b048ac951c04d6 Mon Sep 17 00:00:00 2001
+From 5df7d8234e56e5883c52ee73b4583e071c8a85b9 Mon Sep 17 00:00:00 2001
 From: Mario Behn <mario.behn@gmail.com>
-Date: Sat, 31 Oct 2026 14:27:43 +0100
+Date: Sat, 31 Oct 2026 15:06:57 +0100
 Subject: [PATCH 3/3] ARM: dts: zynq: take the ADI zynq.dtsi and zynq-7000.dtsi
 
 The Tezuka Pluto+ device tree includes zynq.dtsi, which mainline does
