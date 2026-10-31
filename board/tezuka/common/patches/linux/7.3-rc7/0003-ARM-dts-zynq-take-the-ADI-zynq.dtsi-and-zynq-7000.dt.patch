@@ -1,7 +1,7 @@
 From 5df7d8234e56e5883c52ee73b4583e071c8a85b9 Mon Sep 17 00:00:00 2001
 From: Mario Behn <mario.behn@gmail.com>
 Date: Sat, 31 Oct 2026 15:06:57 +0100
-Subject: [PATCH 3/3] ARM: dts: zynq: take the ADI zynq.dtsi and zynq-7000.dtsi
+Subject: [PATCH 3/4] ARM: dts: zynq: take the ADI zynq.dtsi and zynq-7000.dtsi
 
 The Tezuka Pluto+ device tree includes zynq.dtsi, which mainline does
 not have, and needs the ADI changes in zynq-7000.dtsi (all four FCLKs
