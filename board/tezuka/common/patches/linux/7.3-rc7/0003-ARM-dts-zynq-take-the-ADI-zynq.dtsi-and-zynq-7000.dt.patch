@@ -1,0 +1,102 @@
+From 3b961a96280b6a1a057c21c466b048ac951c04d6 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Sat, 31 Oct 2026 14:27:43 +0100
+Subject: [PATCH 3/3] ARM: dts: zynq: take the ADI zynq.dtsi and zynq-7000.dtsi
+
+The Tezuka Pluto+ device tree includes zynq.dtsi, which mainline does
+not have, and needs the ADI changes in zynq-7000.dtsi (all four FCLKs
+enabled in the clock controller, the FCLK clocks given to the devcfg
+node, the efuse node). Both files are taken from the ADI Linux 6.12
+tree and adapted to the 7.3 directory layout (arch/arm/boot/dts/xilinx).
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ arch/arm/boot/dts/xilinx/zynq-7000.dtsi | 18 +++++++++----
+ arch/arm/boot/dts/xilinx/zynq.dtsi      | 34 +++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+), 5 deletions(-)
+ create mode 100644 arch/arm/boot/dts/xilinx/zynq.dtsi
+
+diff --git a/arch/arm/boot/dts/xilinx/zynq-7000.dtsi b/arch/arm/boot/dts/xilinx/zynq-7000.dtsi
+index 153b8d93cbee..75dfd2f069da 100644
+--- a/arch/arm/boot/dts/xilinx/zynq-7000.dtsi
++++ b/arch/arm/boot/dts/xilinx/zynq-7000.dtsi
+@@ -1,6 +1,9 @@
+-// SPDX-License-Identifier: GPL-2.0
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+- * Copyright (C) 2011 - 2014 Xilinx
++ * Xilinx Zynq 7000 DTSI
++ * Describes the hardware common to all Zynq 7000-based boards.
++ *
++ *  Copyright (C) 2011 - 2015 Xilinx
+  */
+ 
+ / {
+@@ -342,7 +345,7 @@ clkc: clkc@100 {
+ 				bootph-all;
+ 				#clock-cells = <1>;
+ 				compatible = "xlnx,ps7-clkc";
+-				fclk-enable = <0>;
++				fclk-enable = <0xf>;
+ 				clock-output-names = "armpll", "ddrpll", "iopll", "cpu_6or4x",
+ 						"cpu_3or2x", "cpu_2x", "cpu_1x", "ddr2x", "ddr3x",
+ 						"dci", "lqspi", "smc", "pcap", "gem0", "gem1",
+@@ -394,11 +397,16 @@ devcfg: devcfg@f8007000 {
+ 			reg = <0xf8007000 0x100>;
+ 			interrupt-parent = <&intc>;
+ 			interrupts = <0 8 4>;
+-			clocks = <&clkc 12>;
+-			clock-names = "ref_clk";
++			clocks = <&clkc 12>, <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
++			clock-names = "ref_clk", "fclk0", "fclk1", "fclk2", "fclk3";
+ 			syscon = <&slcr>;
+ 		};
+ 
++		efuse: efuse@f800d000 {
++			compatible = "xlnx,zynq-efuse";
++			reg = <0xf800d000 0x20>;
++		};
++
+ 		global_timer: timer@f8f00200 {
+ 			compatible = "arm,cortex-a9-global-timer";
+ 			reg = <0xf8f00200 0x20>;
+diff --git a/arch/arm/boot/dts/xilinx/zynq.dtsi b/arch/arm/boot/dts/xilinx/zynq.dtsi
+new file mode 100644
+index 000000000000..1cf27fe95fd4
+--- /dev/null
++++ b/arch/arm/boot/dts/xilinx/zynq.dtsi
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) 2024 Analog Devices Inc. */
++
++#include "zynq-7000.dtsi"
++
++/ {
++	interrupt-parent = <&intc>;
++
++	aliases: aliases {
++		ethernet0 = &gem0;
++		serial0 = &uart1;
++	};
++};
++
++&gem0 {
++	status = "okay";
++};
++
++&clkc {
++	ps-clk-frequency = <33333333>;
++};
++
++&usb0 {
++	status = "okay";
++	dr_mode = "host"; /* This breaks OTG mode */
++};
++
++&uart1 {
++	status = "okay";
++};
++
++&sdhci0 {
++	status = "okay";
++};
