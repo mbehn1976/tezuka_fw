@@ -651,3 +651,19 @@ At 10 MS/s a block lasts 26.2 ms, so 4 blocks give about 105 ms of slack. At 32 
 - Logs: `hwtest/session-2026-10-25-rt/logs/k73_axi_dmac_trace_2026-10-31/` (`SUMMARY.txt`, the traces, `exp_*.log` and the analysis scripts).
 
 **What goes into the firmware for 7.3.** `S23udc` exports `LIBIIO_DMA_HEAP_PATH=reserved` when `/dev/dma_heap/reserved` exists (6.12 images have no heap and are unaffected). Together with the 32-block default of `zynqrx` this gave, over 30 rounds at 32 blocks, 16 slips in 4 rounds and 26 clean rounds (6.12: no slips in 20 rounds). `etc/init.d/S24rtprio` sets every `ktimers/N` thread to SCHED_FIFO 99 at boot on kernel 7 and newer (6.x is left alone). Test of the image with the script, started from a reboot with nothing changed by hand, shipped services running, main `iiod` with the `reserved` heap, 30 rounds of 5 s per setting: 4 blocks 10 slips in 7 rounds (23 rounds clean, at most 2 per round), 32 blocks 0 slips (30 clean rounds). 6.12 default for comparison: 4 blocks 5 slips in 3 of 20 rounds, 32 blocks 0. Whether `ktimers/1` needs the change was not tested separately (the script sets both). Log: `exp_G_boot_script.log`.
+
+### 17h. maia-kmod and maia-httpd on 7.3.0-rc7 (2026-10-31, hardware-measured on the Pluto+)
+
+- **Kernel patch needed.** `maia-sdr.ko` calls `v7_dma_inv_range` and `arm_cache_outer_inv_range` directly. Mainline does not export them; the 6.12 tree does through `board/tezuka/common/patches/linux/adi-6.12.y/005-maiasdr.patch`. Without it `modpost` stops with undefined symbols. The patch applies to rc7 with line offsets only (checked with the build, no other change). A 7.3 kernel therefore carries that patch.
+- **Module.** `maia-kmod` 0.12.0 with the five patches of `package/maia-kmod`, built out of tree against the 7.3 tree (vermagic `7.3.0-rc7 SMP preempt_rt mod_unload modversions ARMv7`). The ramdisk of the test image carries it under `/lib/modules/7.3.0-rc7/updates` with `depmod` files; `S50maia-kmod` loads it at boot, the devices `maia-sdr-spectrometer`, `-recording`, `-raw-capture` and `-iq-waterfall` appear and `maia-httpd` (`S60`) starts. No BUG, WARN, Oops or RCU message in `dmesg`.
+- **Tests** (BIST tone as the source; the test scripts use `iio:device0` for the AD9361, which is `iio:device1` on 7.3, so copies with the index changed were run):
+
+| Test | Result |
+|---|---|
+| `wftone.py`: waterfall follows the stepped tone | Peak bins 2175, 2559, 2303, 2431 as on 6.12; settled within 2 frames; distinct settled spectra per tone 11, 13, 10, 11 (6.12 runs: 8 to 16) |
+| `kmodrace`, 20 s: mmap/munmap against `IOCTL_CACHEINV` | 239955 maps, 170195 successful invalidations, no oops or hang |
+| `tonetest.py`, 20 s: BIST 960 kHz, DDC, CS16 capture | 30.72 M samples, 0 I/Q misalignment per million, 0 dropouts |
+| Recorder via REST, 4 s, BIST 960 kHz | 33554432 `ci16` samples (the 128 MiB region, full), tone at 960.5 kHz, 0 phase jumps above 0.5 rad, 0 zero samples |
+
+- **Not tested.** Raw capture and the I/Q waterfall: the shipped `maia-httpd` has no API for them (the kernel devices exist and load). No multi-hour run of `maia-httpd` under load.
+- **Files.** Logs and scripts: `hwtest/session-2026-10-25-rt/logs/k73_maia_2026-10-31/`; module: `hwtest/session-2026-10-25-rt/k73_port/maia-sdr-7.3.0-rc7.ko`. Test image: `known_good/sdimg-k73rc7-maia` (kernel with tracing and the `005` patch).
