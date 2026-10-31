@@ -6,6 +6,8 @@
 CONFIGFS=/sys/kernel/config/usb_gadget
 GADGET=$CONFIGFS/composite_gadget
 IIOD_OPTS="-D -n $ENDPOINTS -F /dev/iio_ffs"
+# libiio 1.0 streams through a DMA heap; the CMA backed one avoids sample slips at the block hand-over (doc 17f)
+[ -e /dev/dma_heap/reserved ] && export LIBIIO_DMA_HEAP_PATH=reserved
 UDC_HANDLE_SUSPEND=$(fw_printenv -n udc_handle_suspend 2> /dev/null || echo 0 | tr -cd '[a-zA-Z0-9]._-')
 USB_ETH_MODE=$(fw_printenv -n usb_ethernet_mode 2> /dev/null || echo rndis | tr -cd '[a-zA-Z0-9]._-')
 AUDIO_MODE=$(fw_printenv -n audio_mode 2> /dev/null || echo off | tr -cd '[a-zA-Z0-9]._-')

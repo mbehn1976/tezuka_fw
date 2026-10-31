@@ -621,3 +621,33 @@ Same board, same script and phases as 17d, `cyclictest` on the isolated core 1 (
 - Not yet in the shipped path: the boot `iiod` still uses the default `system` heap, because `S23udc` was not changed. The firmware needs `LIBIIO_DMA_HEAP_PATH=reserved` there, or a different libiio default.
 - Setup difference: 7.3 ran with few services (no `classifier`, `maia-httpd`), 6.12 with the shipped set, which makes the 6.12 control the harder case. TX was tested only with the cyclic tone. `maia-kmod` and `maia-httpd` were not tried on 7.3, and QSPI is still open (17c).
 - Logs and tools: `hwtest/session-2026-10-25-rt/logs/k73_adi_stream_2026-10-30/` (`SUMMARY.txt`, `drop73_run1.log`, `drop612_run1.log`, `drop73_reserved.log`, `drop73.py`, `slip.py`, `tone.bin`). The saved port config predates the `DMABUF_HEAPS` options, which must be added.
+
+### 17g. Why 7.3 lost samples at 4 blocks, and the fix (2026-10-31, hardware-measured on the Pluto+)
+
+**Where the loss is.** `ftrace` (function tracer, built into the 6.12 and 7.3 test kernels only; the shipped kernels have no tracing) on the RX path during a 10 MS/s network stream. The DMA and its interrupt are fine on both kernels. The DMA queue runs empty when a finished block is handed back late, and the hand-back is slower on 7.3.
+
+| 4 blocks, about 9 s | 6.12.114-rt21 | 7.3.0-rc7 (`reserved` heap) |
+|---|---|---|
+| Times the DMA queue ran empty | 0 | 26 (gaps up to 114 ms) |
+| Block done to block re-enqueued: median / p99 / max | 24 / 51 / 53 ms | 28 / 169 / 213 ms |
+
+At 10 MS/s a block lasts 26.2 ms, so 4 blocks give about 105 ms of slack. At 32 blocks the queue did not empty on either kernel. On 7.3 the path is: interrupt thread marks the block done, `writer-task` sends it (`tcp_sendmsg`, about 4 ms), `net_client_thd` gets the client reply, `buffer-enqueue` re-queues the block.
+
+**Cause found.** In the slow windows CPU 0 was about 93 % busy with `irq/31-eth` and `ktimers/0`. `ktimers/0` runs at SCHED_FIFO 1. On 7.3 it was switched in 34628 times against 2055 on 6.12 for about 1200 wakeups, each time boosted to priority 49 by priority inheritance while the Ethernet interrupt thread was blocked on the softirq lock: the two threads contend on CPU 0 and the network transmit stalls. (Trace overhead loads both CPUs to about 90 % on both kernels, so these figures compare the kernels only relatively.) The shipped shell services (`api_controller`, MQTT, `watch*`) were also seen running in the slow windows but are not the cause.
+
+**Experiments** (runtime changes on the 7.3 test image, main `iiod` with the `reserved` heap, loopback tone, 15 rounds of 5 s per setting, slips counted by the phase jump detector):
+
+| Variant | 4 blocks: slips (rounds with slips) | 32 blocks: slips |
+|---|---|---|
+| A: shipped services running | 133 (15) | 2 |
+| B: services stopped | 164 (13) | 0 |
+| C, C2: B and `irq/31-eth` at FIFO 99 (was 50) | 50 (8) and 71 (10) | 0 and 1 |
+| D, D2: B and `irq/31-eth` and `ktimers/0` at FIFO 99 | 1 (1) and 3 (3) | 0 |
+| E: services stopped, `ktimers/0` at FIFO 99 only | 3 (2) | 0 |
+| F: after a reboot, services running, `ktimers/0` at FIFO 99 only | 5 (5) | 0 |
+
+- `ktimers/0` at FIFO 99 is the lever. With it, 7.3 at 4 blocks has 5 slips in 5 of 15 rounds with the shipped services running (6.12 default: 5 slips in 3 of 20 rounds). Raising only the Ethernet thread helps by a third to a half.
+- Run `chrt -f -p 99` on the `ktimers/0` thread; it is lost at reboot. It is not in the firmware yet. A boot script would need to find the kernel thread by name and set the priority; whether `ktimers/1` needs it too was not tested.
+- Logs: `hwtest/session-2026-10-25-rt/logs/k73_axi_dmac_trace_2026-10-31/` (`SUMMARY.txt`, the traces, `exp_*.log` and the analysis scripts).
+
+**What goes into the firmware for 7.3.** `S23udc` exports `LIBIIO_DMA_HEAP_PATH=reserved` when `/dev/dma_heap/reserved` exists (6.12 images have no heap and are unaffected). Together with the 32-block default of `zynqrx` this gave, over 30 rounds at 32 blocks, 16 slips in 4 rounds and 26 clean rounds (6.12: no slips in 20 rounds). The `ktimers/0` priority would bring 4 blocks to the 6.12 level but needs a boot script that has not been written or run at boot.
