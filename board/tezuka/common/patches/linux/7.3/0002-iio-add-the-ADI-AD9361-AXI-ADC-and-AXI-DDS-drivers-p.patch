@@ -1,7 +1,7 @@
-From 9debe3c8c87506b69aa495f1b707cdb88fe3e17b Mon Sep 17 00:00:00 2001
+From dceddb6387609c41b7da02f12690cc5e46b52c37 Mon Sep 17 00:00:00 2001
 From: Mario Behn <mario.behn@gmail.com>
 Date: Sat, 31 Oct 2026 15:06:57 +0100
-Subject: [PATCH 2/4] iio: add the ADI AD9361, AXI ADC and AXI DDS drivers,
+Subject: [PATCH 2/5] iio: add the ADI AD9361, AXI ADC and AXI DDS drivers,
  ported to 7.3
 
 Forward port of the out-of-tree Analog Devices drivers used by the
@@ -21201,3 +21201,6 @@ index 000000000000..c95b66fdf660
 +	jesd204_printk(KERN_DEBUG, dev, fmt, ##__VA_ARGS__)
 +
 +#endif
+-- 
+2.53.0
+

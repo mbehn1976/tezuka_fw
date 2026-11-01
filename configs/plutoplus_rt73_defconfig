@@ -1,4 +1,4 @@
-# Linux 7.3 PREEMPT_RT for the Pluto+ (SD boot). Kernel: mainline tarball + patches/linux/7.3-rc7 (ADI drivers, cache export, zynq.dtsi, QSPI read only).
+# Linux 7.3 PREEMPT_RT for the Pluto+ (SD boot). Kernel: mainline v7.3 tarball + patches/linux/7.3 (ADI drivers, cache export, zynq.dtsi, QSPI read only, SPI error recovery).
 # The kernel config is complete (no fragments). See doc/UPGRADE_REALTIME_7.3.md 17j and 17k.
 BR2_arm=y
 BR2_cortex_a9=y
@@ -25,8 +25,8 @@ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
 BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="file:///home/mb/code/linux-7.3-rc7.tar.gz"
-BR2_LINUX_KERNEL_PATCH="${BR2_EXTERNAL_PLUTOSDR_PATH}/board/tezuka/common/patches/linux/7.3-rc7"
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="file:///home/mb/code/linux-7.3.tar.gz"
+BR2_LINUX_KERNEL_PATCH="${BR2_EXTERNAL_PLUTOSDR_PATH}/board/tezuka/common/patches/linux/7.3"
 BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
 
 BR2_LINUX_KERNEL_DTS_SUPPORT=y

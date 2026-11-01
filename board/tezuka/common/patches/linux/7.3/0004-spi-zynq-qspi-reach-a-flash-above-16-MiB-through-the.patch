@@ -1,7 +1,7 @@
-From 080e6377902551980ff7e16db45f0066af9f3a80 Mon Sep 17 00:00:00 2001
+From d7452c830fce598eadfebb6f64f458a96c8844f1 Mon Sep 17 00:00:00 2001
 From: Mario Behn <mario.behn@gmail.com>
 Date: Sat, 31 Oct 2026 17:56:33 +0100
-Subject: [PATCH 4/4] spi: zynq-qspi: reach a flash above 16 MiB through the
+Subject: [PATCH 4/5] spi: zynq-qspi: reach a flash above 16 MiB through the
  Extended Address Register (read only)
 
 The Zynq QSPI controller sends at most 3 address bytes, and spi-nor needs
@@ -238,3 +238,6 @@ index d762aaf452af..e20019a03964 100644
  };
  
  static const struct spi_controller_mem_caps zynq_qspi_mem_caps = {
+-- 
+2.53.0
+
