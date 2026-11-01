@@ -721,3 +721,31 @@ Setup: `sdimg-rt73-br` (17k) and `sdimg-rt21-sw`, AD9361 loopback, cyclic TX ton
 - **Conclusion.** On this USB path 7.3 is worse than 6.12: about three times the slips and an AD9361 SPI problem that 6.12 does not show. This corrects the impression of 17f to 17k that 7.3 is on par; the Ethernet 10 MS/s results there stand but were short and ran without the full service set. The Ethernet 10 MS/s soak was not run. Cause not found. Next steps to isolate: stop `watch*`/`api_controller`/`maia-httpd` on 7.3, boot an image without the QSPI patch, boot without `S24rtprio`, check priority and affinity of the `spi0` interrupt thread.
 - Logs: `hwtest/session-2026-10-25-rt/logs/k73_soak_2026-10-31/` (`SUMMARY.txt`, `fail/`, `control_612/`).
 
+
+### 17m. The AD9361 SPI timeouts on 7.3: cause, recovery and the move to the 7.3 release (2026-11-01, hardware-measured on the Pluto+)
+
+**What a timeout does.** The first `SPI transfer timed out` of a boot left the AD9361 unusable until the next reboot: every register read returned `0xFF`, the sample rate read back as garbage, `ensm_mode` read `sleep`, and the next rate change failed with `Calibration TIMEOUT (0x5E, 0x80)`. The I/Q stream itself kept running (it does not use SPI). The controller status register showed `0x14` while the bus was idle (RX FIFO not empty; a fresh boot shows `0x04`): the bytes of the timed-out transfer stay in the RX FIFO, nothing in the host path drains them, and every later transfer reads them first. The driver code (`spi-cadence.c`) and the 200 ms timeout in the SPI core are identical between ADI 6.12.114 and 7.3; 6.12 just never times out. So 17l's `19 timeouts` and `5 timeouts` were one timeout each plus the wedged state; the valid measure is the time to the first timeout.
+
+**Where the timeout comes from.** The SPI interrupt thread (`irq/29-e0006000.spi`, SCHED_FIFO 50) shares CPU 0 with the USB, Ethernet, DMA and maia interrupt threads, all FIFO 50, and with `ktimers/0`. Under a USB stream it is sometimes not scheduled within the 200 ms the SPI core waits. `S24rtprio` as written on 2026-10-31 (ktimers at FIFO 99) made this much worse: anything above 50 preempts the SPI thread.
+
+**Runs** (USB link, AD9361 loopback, cyclic TX tone, RX 5 MS/s, 32 blocks, 5 s rounds, services running, fresh boot each; logs in `hwtest/session-2026-10-25-rt/logs/k73_spi_2026-11-01/`, `SUMMARY.txt`):
+
+| Run | Kernel | ktimers | SPI irq | Length | First SPI timeout | Rounds with slips |
+|---|---|---|---|---|---|---|
+| A | 7.3.0-rc7 | 99 (as shipped) | CPU 0 | 15 min | within 4 min (wedged after it) | 43 of 80 |
+| B | 7.3.0-rc7 | 1 | CPU 0 | 30 min | at 24 min | 50 of 160 |
+| F | 7.3.0-rc7 | 51 | CPU 0 | 30 min | within 2 min | 108 of 160 |
+| G | 6.12.114-rt21 | 1 (default) | CPU 0 | 39 min | none | 24 of 215 |
+| I | 7.3.0 + patch 0005 | 51 | CPU 0 | 15 min | at 3 min, 8 in all, chip healthy throughout | 45 of 80 |
+| H | 7.3.0 + patch 0005 | 51 | CPU 1 | 30 min | none | 69 of 160 |
+
+Ethernet at 10 MS/s (one 7.3.0-rc7 boot, `ktimers` changed at runtime, 15 rounds per setting): with 4 blocks, 9 of 15 rounds had slips at 99 and at 51, 15 of 15 at 49 and at 1 (213 and 201 slips); with 32 blocks 0 at 99 and 51, 7 and 9 of 15 at 49 and 1. No SPI timeout in 22 min of Ethernet streaming. So the 17g fix needs `ktimers` above the interrupt threads, and 51 is enough.
+
+**What went into the firmware.**
+- Kernel patch `0005-spi-cadence-recover-the-controller-after-a-failed-tr.patch`: a `handle_err` callback that masks the interrupts, drains the RX FIFO and re-initialises the controller after a failed transfer. Run I: 8 timeouts, and after each one the product ID (`0x037 = 0x0A`), the rate readback, a rate write and the controller status (`0x04`) were as on a fresh boot. A timeout now costs one failed register read. The patch also applies and compiles on the ADI 6.12.114 tree; candidate for mainline.
+- `S24rtprio`: `ktimers` at FIFO 51 instead of 99, and the AD9361 SPI interrupt moved to CPU 1 (`smp_affinity`). Run H: no timeout in 30 min where run I on the same image and settings had its first after 3 min.
+- `patches/linux/7.3/` replaces `7.3-rc7/`: the four rc7 patches rebased unchanged onto the 7.3 release of 2026-10-18 (none of the files they touch changed after rc7; nothing in `drivers/spi`, the ChipIdea USB driver or the Zynq code changed either) plus 0005. `configs/plutoplus_rt73_defconfig` builds from `linux-7.3.tar.gz` (`git archive` of the tag `v7.3`). Image `known_good/sdimg-rt73-final`, kernel branch `tezuka/7.3` (`linux-73` worktree).
+
+**Also seen.** One boot of the rc7 image (18:46) stalled CPU 0 for 60 s in the ChipIdea UDC interrupt thread (`_ep_set_halt` busy loop) during the host's RNDIS setup; the host's RNDIS probe failed with -110 and the board came up with `usb0` at 192.168.2.1 and no Ethernet address. The loop is the same in 6.12; the ChipIdea driver changed by about 100 lines in 7.3. Seen once in about ten boots; recovered over the USB ACM console with `reboot`. Not reproduced on demand.
+
+**Not done.** The combination (51 + SPI on CPU 1 + 0005) over Ethernet and as a long soak; the original Pluto on 7.3 (`sdimg-rt73-final.pluto.frm` was never flashed); the USB stall. The rounds with slips over USB (11 % on 6.12, 30 to 70 % on 7.3) are a transport matter, not SPI: see 17n.
