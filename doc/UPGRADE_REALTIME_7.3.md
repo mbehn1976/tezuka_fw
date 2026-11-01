@@ -706,3 +706,18 @@ The ADI drivers and the cache export patch were moved from the scratch tree into
 
 **Test of `sdimg-rt73-br` on the Pluto+.** Boots 7.3.0-rc7 `PREEMPT_RT`, AD9361 initialises, three DMA heaps, `iiod`, `mosquitto`, `maia-httpd` and `maia_sdr` run, no `BUG`/`WARNING`/Oops. Local capture 3 x 2621440 samples. RX LO set to 60 MHz and 6 GHz. `maia` spectrum with four tones: peak bins 2175/2303/2431/2559 as on the earlier 7.3 image, settled within 3 frames. Not run on this image: the Ethernet stream drop test (the PC has no 192.168.3.x address), the multi-hour soak, any flash write. Logs: `hwtest/session-2026-10-25-rt/logs/k73_qspi_ro_2026-10-31/` and `k73_qspi_br_2026-10-31/`.
 
+### 17l. Stream test and soak on the Buildroot 7.3 image against a 6.12 control (2026-10-31, hardware-measured on the Pluto+, USB link only)
+
+Setup: `sdimg-rt73-br` (17k) and `sdimg-rt21-sw`, AD9361 loopback, cyclic TX tone, RX 5 MS/s over the USB link (192.168.4.1; the Ethernet path was not available because the PC has no 192.168.3.x address), libiio 1.0 `iio_rwdev -b 262144`, 32 blocks, 5 s rounds, phase-jump detector as in 17f, board monitor once a minute (memory, `iiod` size, die temperature, TX writer, kernel log, `maia` API). Short tests before the soak: 2.5 MS/s 0 slips; 5 MS/s with 4 blocks slips (44 in 3 rounds), with 32 blocks 0 in 3 rounds.
+
+| Run | Rounds | Incomplete | Rounds with slips | Slips (max/round) | AD9361 SPI timeouts |
+|---|---|---|---|---|---|
+| 7.3, run 1 (about 55 min) | 191 | 18 (from round 174 on) | 113 | 216 (6) | 19 at the end |
+| 7.3, run 2 (after reboot, 21 min) | 85 | 0 | 45 | 60 (4) | 5 |
+| 6.12 control (18 min) | 90 | 0 | 19 | 19 (1) | 0 |
+
+- **SPI timeouts on 7.3.** `ad9361 spi0.0: SPI transfer timed out`, `spi_master spi0: failed to transfer one message from queue`, `Read Error -110` / `Write Error -110` (also from `iio_debugfs_write_reg`). The SPI core waits 200 ms plus twice the transfer time for the completion interrupt of `spi0` (Cadence SPI). The first timeout came about one minute after the stream started in both runs. The chip still answered afterwards (register 0x37 = 0x0A). In run 1 the errors piled up until libiio could no longer read the attributes when `iio_rwdev` opened the device, so rounds from 174 on failed; the stream itself does not use SPI. My first monitor missed the SPI messages (its pattern had no SPI strings), so run 1 was only noticed at that point.
+- **Not the cause of the difference:** memory (flat), temperature (65 to 68 C on both), the QSPI interrupt rate (about 1400 per second on both kernels, so the shipped scripts poll the flash).
+- **Conclusion.** On this USB path 7.3 is worse than 6.12: about three times the slips and an AD9361 SPI problem that 6.12 does not show. This corrects the impression of 17f to 17k that 7.3 is on par; the Ethernet 10 MS/s results there stand but were short and ran without the full service set. The Ethernet 10 MS/s soak was not run. Cause not found. Next steps to isolate: stop `watch*`/`api_controller`/`maia-httpd` on 7.3, boot an image without the QSPI patch, boot without `S24rtprio`, check priority and affinity of the `spi0` interrupt thread.
+- Logs: `hwtest/session-2026-10-25-rt/logs/k73_soak_2026-10-31/` (`SUMMARY.txt`, `fail/`, `control_612/`).
+
