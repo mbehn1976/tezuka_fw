@@ -1,0 +1,74 @@
+From 846570d034995a15465859c68d6cc2e04d89d8bb Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Sun, 1 Nov 2026 20:47:43 +0100
+Subject: [PATCH 5/5] spi: cadence: recover the controller after a failed
+ transfer
+
+When a transfer times out, the bytes it clocked in are still in the RX
+FIFO: the interrupt that would have read them did not run in time, and
+the host path never drains the FIFO between transfers (only the target
+path does, in cdns_unprepare_transfer_hardware).  Every later transfer
+then reads the stale bytes first and returns shifted data, and the
+device behind the controller looks dead until the system is rebooted.
+
+Seen on a Zynq-7010 with an AD9361 on spi0 under PREEMPT_RT: after one
+"SPI transfer timed out" every register read returned 0xFF, the status
+register showed RX FIFO not empty while the bus was idle, and a later
+sample rate change failed with a calibration timeout.
+
+Add a handle_err callback that masks the interrupts, drops the stale
+bytes and brings the controller back to its initial state.  The next
+message sets the clock mode, the clock rate and the chip select again
+through the usual prepare_message, transfer_one and set_cs path.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ drivers/spi/spi-cadence.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/drivers/spi/spi-cadence.c b/drivers/spi/spi-cadence.c
+index 50ef3a7871c2..474ce14a59b3 100644
+--- a/drivers/spi/spi-cadence.c
++++ b/drivers/spi/spi-cadence.c
+@@ -542,6 +542,30 @@ static int cdns_transfer_one(struct spi_controller *ctlr,
+ 	return transfer->len;
+ }
+ 
++/**
++ * cdns_spi_handle_err - Recover the controller after a failed transfer
++ * @ctlr:	Pointer to the spi_controller structure
++ * @msg:	Pointer to the spi_message that failed
++ *
++ * A transfer that timed out leaves the bytes it clocked in sitting in the
++ * RX FIFO, because the interrupt that reads them did not run in time and
++ * the host path never drains the FIFO between transfers.  Every later
++ * transfer would then read those stale bytes first and return shifted
++ * data.  Mask the interrupts, drop the stale bytes and bring the
++ * controller back to its initial state; the next message sets the clock
++ * and the chip select again on its way through transfer_one.
++ */
++static void cdns_spi_handle_err(struct spi_controller *ctlr,
++				struct spi_message *msg)
++{
++	struct cdns_spi *xspi = spi_controller_get_devdata(ctlr);
++
++	cdns_spi_write(xspi, CDNS_SPI_IDR, CDNS_SPI_IXR_ALL);
++	xspi->tx_bytes = 0;
++	xspi->rx_bytes = 0;
++	cdns_spi_init_hw(xspi, spi_controller_is_target(ctlr));
++}
++
+ /**
+  * cdns_prepare_transfer_hardware - Prepares hardware for transfer.
+  * @ctlr:	Pointer to the spi_controller structure which provides
+@@ -727,6 +751,7 @@ static int cdns_spi_probe(struct platform_device *pdev)
+ 	ctlr->prepare_message = cdns_prepare_message;
+ 	ctlr->transfer_one = cdns_transfer_one;
+ 	ctlr->unprepare_transfer_hardware = cdns_unprepare_transfer_hardware;
++	ctlr->handle_err = cdns_spi_handle_err;
+ 	ctlr->mode_bits = SPI_CPOL | SPI_CPHA;
+ 	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
+ 	ctlr->flags = SPI_CONTROLLER_MUST_TX;
+-- 
+2.53.0
+

@@ -1,0 +1,212 @@
+From c9fe47a3bf92da1a760a6e0cecce073cc9538927 Mon Sep 17 00:00:00 2001
+From: Mario Behn <mario.behn@gmail.com>
+Date: Mon, 2 Nov 2026 14:51:00 +0100
+Subject: [PATCH] spi: zynq-qspi: program and erase a flash above 16 MiB
+ through the extended address register
+
+The read-only stage turned every operation with a 4-byte address into
+WREN, WREAR(addr >> 24), the 3-byte form of the operation and WREAR(0),
+and refused programs and erases. Carry them the same way, with the
+things they need:
+
+ - the write enable the spi-nor core sent before the operation is used
+   up by the WREAR command, so it is sent again after it (the ADI 6.12
+   spi-nor code does the same);
+ - a program or an erase with the wrong bank selected lands 16 MiB away
+   from where it was meant, so the bank register is read back (RDEAR)
+   before the operation and the write is refused with -EIO if it does
+   not hold the expected value;
+ - after a program or an erase the flash is busy and ignores everything
+   but Read Status, so the bank register is restored only once the WIP
+   bit is clear (bounded at 3 s, a 64 KiB block erase takes up to 2 s on
+   the W25Q256), then WREN, WREAR(0), WRDI so the write enable latch is
+   not left set.
+
+The bank register is 0 between operations, so operations in bank 0 keep
+going out unchanged and a warm reboot leaves the BootROM and U-Boot in
+bank 0. Address-less commands (write enable and disable, status register
+reads and writes, chip erase) go out as they are.
+
+Signed-off-by: Mario Behn <mario.behn@gmail.com>
+---
+ drivers/spi/spi-zynq-qspi.c | 113 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 98 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/spi/spi-zynq-qspi.c b/drivers/spi/spi-zynq-qspi.c
+index e20019a03964..c72c00a82a99 100644
+--- a/drivers/spi/spi-zynq-qspi.c
++++ b/drivers/spi/spi-zynq-qspi.c
+@@ -230,10 +230,14 @@ static void zynq_qspi_init_hw(struct zynq_qspi *xqspi, unsigned int num_cs)
+  * WREN + WREAR(addr >> 24) + the 3-byte form of the operation, and the EAR is
+  * set back to 0 afterwards, so that U-Boot and the BootROM find the flash in
+  * bank 0 after a reset (the same scheme as the ADI 6.12 spi-nor code, but in
+- * the controller driver instead of the spi-nor core).
++ * the controller driver instead of the spi-nor core). A program or an erase
++ * above 16 MiB needs a second write enable after the WREAR, and the flash is
++ * busy afterwards, so the bank register is restored once it is ready again.
+  */
+ #define ZYNQ_QSPI_BANK_SIZE		0x1000000U
+ #define ZYNQ_QSPI_OP_WREAR		0xc5	/* Write Extended Address Register */
++#define ZYNQ_QSPI_OP_RDEAR		0xc8	/* Read Extended Address Register */
++#define ZYNQ_QSPI_READY_TIMEOUT_MS	3000
+ 
+ static bool zynq_qspi_supports_op(struct spi_mem *mem,
+ 				  const struct spi_mem_op *op)
+@@ -661,12 +665,44 @@ static int zynq_qspi_exec_plain_op(struct spi_mem *mem,
+ 	return err;
+ }
+ 
+-/* Stage 2: the flash is read-only through this driver. */
+-static bool zynq_qspi_op_is_read(const struct spi_mem_op *op)
++/* a program or an erase: the flash is busy afterwards */
++static bool zynq_qspi_op_is_write(const struct spi_mem_op *op)
+ {
+-	if (op->data.nbytes && op->data.dir == SPI_MEM_DATA_IN)
+-		return true;
+-	return false;
++	return !(op->data.nbytes && op->data.dir == SPI_MEM_DATA_IN);
++}
++
++/*
++ * Wait until the flash has finished a program or an erase (WIP clear). While
++ * it is busy it ignores every command but Read Status, so the bank register
++ * cannot be restored before this.
++ */
++static int zynq_qspi_wait_ready(struct spi_mem *mem, const struct spi_mem_op *like)
++{
++	u8 *sr = kmalloc(1, GFP_KERNEL);
++	struct spi_mem_op rdsr = SPI_MEM_OP(SPI_MEM_OP_CMD(SPINOR_OP_RDSR, 1),
++					    SPI_MEM_OP_NO_ADDR,
++					    SPI_MEM_OP_NO_DUMMY,
++					    SPI_MEM_OP_DATA_IN(1, sr, 1));
++	unsigned long deadline;
++	int ret;
++
++	if (!sr)
++		return -ENOMEM;
++	rdsr.max_freq = like->max_freq;
++	/* a 64 KiB block erase takes up to 2 s on the W25Q256 */
++	deadline = jiffies + msecs_to_jiffies(ZYNQ_QSPI_READY_TIMEOUT_MS);
++	for (;;) {
++		ret = zynq_qspi_exec_plain_op(mem, &rdsr);
++		if (ret || !(*sr & SR_WIP))
++			break;
++		if (time_after(jiffies, deadline)) {
++			ret = -ETIMEDOUT;
++			break;
++		}
++		usleep_range(200, 500);
++	}
++	kfree(sr);
++	return ret;
+ }
+ 
+ static int zynq_qspi_ear_cmds(struct spi_mem *mem, const struct spi_mem_op *like,
+@@ -692,16 +728,60 @@ static int zynq_qspi_ear_cmds(struct spi_mem *mem, const struct spi_mem_op *like
+ 	ret = zynq_qspi_exec_plain_op(mem, &wren);
+ 	if (!ret)
+ 		ret = zynq_qspi_exec_plain_op(mem, &wrear);
++	/*
++	 * A program or an erase with the wrong bank selected lands 16 MiB away
++	 * from where it was meant, so read the register back before going on.
++	 */
++	if (!ret && wren_after) {
++		struct spi_mem_op rdear = SPI_MEM_OP(SPI_MEM_OP_CMD(ZYNQ_QSPI_OP_RDEAR, 1),
++						     SPI_MEM_OP_NO_ADDR,
++						     SPI_MEM_OP_NO_DUMMY,
++						     SPI_MEM_OP_DATA_IN(1, buf, 1));
++
++		rdear.max_freq = like->max_freq;
++		*buf = ~ear;
++		ret = zynq_qspi_exec_plain_op(mem, &rdear);
++		if (!ret && *buf != ear) {
++			dev_err(&mem->spi->dev,
++				"bank register %u not taken (reads %u), write refused\n",
++				ear, *buf);
++			ret = -EIO;
++		}
++	}
+ 	if (!ret && wren_after)
+ 		ret = zynq_qspi_exec_plain_op(mem, &wren);
+ 	kfree(buf);
+ 	return ret;
+ }
+ 
++/*
++ * Back to bank 0: after a program or an erase wait for the flash first, then
++ * WREN + WREAR(0) + WRDI (the write enable latch must not stay set).
++ */
++static int zynq_qspi_ear_restore(struct spi_mem *mem, const struct spi_mem_op *like,
++				 bool after_write)
++{
++	struct spi_mem_op wrdi = SPI_MEM_OP(SPI_MEM_OP_CMD(SPINOR_OP_WRDI, 1),
++					    SPI_MEM_OP_NO_ADDR,
++					    SPI_MEM_OP_NO_DUMMY,
++					    SPI_MEM_OP_NO_DATA);
++	int ret = 0;
++
++	wrdi.max_freq = like->max_freq;
++	if (after_write)
++		ret = zynq_qspi_wait_ready(mem, like);
++	if (!ret)
++		ret = zynq_qspi_ear_cmds(mem, like, 0, false);
++	if (!ret)
++		ret = zynq_qspi_exec_plain_op(mem, &wrdi);
++	return ret;
++}
++
+ static int zynq_qspi_exec_mem_op(struct spi_mem *mem,
+ 				 const struct spi_mem_op *op)
+ {
+ 	struct spi_mem_op nop = *op;
++	bool write;
+ 	u8 ear;
+ 	int ret, ret2;
+ 
+@@ -710,23 +790,26 @@ static int zynq_qspi_exec_mem_op(struct spi_mem *mem,
+ 	    (op->cmd.opcode == SPINOR_OP_EN4B || op->cmd.opcode == SPINOR_OP_EX4B))
+ 		return 0;
+ 
+-	/* read-only guard: only operations that read data from the flash */
+-	if (!zynq_qspi_op_is_read(op)) {
+-		dev_warn_ratelimited(&mem->spi->dev,
+-				     "read-only: op %#x refused\n", op->cmd.opcode);
+-		return -EROFS;
+-	}
+-
++	/*
++	 * Operations without a 4-byte address go out as they are: reads and
++	 * writes in bank 0, and the address-less commands (write enable and
++	 * disable, status register reads and writes, chip erase).
++	 */
+ 	if (op->addr.nbytes != 4)
+ 		return zynq_qspi_exec_plain_op(mem, op);
+ 
++	write = zynq_qspi_op_is_write(op);
+ 	ear = (op->addr.val >> 24) & 0xff;
+ 	nop.cmd.opcode = zynq_qspi_opcode_3b(op->cmd.opcode);
+ 	nop.addr.nbytes = 3;
+ 	nop.addr.val = op->addr.val & (ZYNQ_QSPI_BANK_SIZE - 1);
+ 
++	/*
++	 * The write enable the caller sent before a program or an erase is
++	 * consumed by the WREAR command, so it is sent again after it.
++	 */
+ 	if (ear) {
+-		ret = zynq_qspi_ear_cmds(mem, op, ear, false);
++		ret = zynq_qspi_ear_cmds(mem, op, ear, write);
+ 		if (ret)
+ 			return ret;
+ 	}
+@@ -734,7 +817,7 @@ static int zynq_qspi_exec_mem_op(struct spi_mem *mem,
+ 	ret = zynq_qspi_exec_plain_op(mem, &nop);
+ 
+ 	if (ear) {
+-		ret2 = zynq_qspi_ear_cmds(mem, op, 0, false);
++		ret2 = zynq_qspi_ear_restore(mem, op, write);
+ 		if (!ret)
+ 			ret = ret2;
+ 	}
+-- 
+2.53.0
+
