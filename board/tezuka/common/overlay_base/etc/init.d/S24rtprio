@@ -7,29 +7,34 @@
 #    its blocks back late and the DMA queue runs empty (17g). Above the interrupt threads (FIFO 50) the contention
 #    is short: 51 keeps the Ethernet path as clean as 99 did, 49 does not (17m).
 # 2. The AD9361 SPI interrupt thread (e0006000.spi, FIFO 50) shares CPU 0 with the USB, Ethernet, DMA and maia
-#    interrupt threads at the same priority. Under a USB stream it was not run within the 200 ms the SPI core
-#    allows and the register read timed out; on CPU 1 it always was (17m). Move that interrupt to CPU 1.
-# 6.x kernels are left alone (not measured there).
+#    interrupt threads at the same priority and with ktimers/0. Under a USB stream or a USB throughput test it was
+#    not run within the 200 ms the SPI core allows and the register read timed out (17m, 17n). Moving it to CPU 1
+#    only traded the contention for one with iiod (RR 99 on CPU 1) under an Ethernet stream (17o). At FIFO 60 on
+#    CPU 0 it preempts the other interrupt threads and ktimers and no timeout was seen on either path.
+# The ktimers change is for 7.x only (not measured on 6.x). The SPI priority applies to every kernel: the same
+# timeout and wedge were reproduced on 6.12.114 under a USB throughput test (17n).
 #
 
 case "$1" in
  start)
-	[ "$(uname -r | cut -d. -f1)" -ge 7 ] 2>/dev/null || exit 0
-	printf "Raising ktimers priority: "
-	n=0
-	for c in /proc/[0-9]*/comm; do
-		case "$(cat "$c" 2>/dev/null)" in
-		ktimers/*)
-			pid=${c#/proc/}
-			pid=${pid%/comm}
-			chrt -f -p 51 "$pid" > /dev/null 2>&1 && n=$((n + 1))
-			;;
-		esac
-	done
-	echo "$n threads"
+	if [ "$(uname -r | cut -d. -f1)" -ge 7 ] 2>/dev/null; then
+		printf "Raising ktimers priority: "
+		n=0
+		for c in /proc/[0-9]*/comm; do
+			case "$(cat "$c" 2>/dev/null)" in
+			ktimers/*)
+				pid=${c#/proc/}
+				pid=${pid%/comm}
+				chrt -f -p 51 "$pid" > /dev/null 2>&1 && n=$((n + 1))
+				;;
+			esac
+		done
+		echo "$n threads"
+	fi
 	irq=$(awk '/e0006000\.spi/ { sub(":", "", $1); print $1 }' /proc/interrupts)
-	if [ -n "$irq" ] && echo 2 > "/proc/irq/$irq/smp_affinity" 2>/dev/null; then
-		echo "AD9361 SPI interrupt $irq moved to CPU 1"
+	pid=$(grep -l "^irq/$irq-" /proc/[0-9]*/comm 2>/dev/null | cut -d/ -f3)
+	if [ -n "$irq" ] && [ -n "$pid" ] && chrt -f -p 60 "$pid" > /dev/null 2>&1; then
+		echo "AD9361 SPI interrupt thread $pid at FIFO 60"
 	fi
 	;;
   stop)
