@@ -10,6 +10,10 @@ IIOD_OPTS="-D -n $ENDPOINTS -F /dev/iio_ffs"
 [ -e /dev/dma_heap/reserved ] && export LIBIIO_DMA_HEAP_PATH=reserved
 UDC_HANDLE_SUSPEND=$(fw_printenv -n udc_handle_suspend 2> /dev/null || echo 0 | tr -cd '[a-zA-Z0-9]._-')
 USB_ETH_MODE=$(fw_printenv -n usb_ethernet_mode 2> /dev/null || echo rndis | tr -cd '[a-zA-Z0-9]._-')
+# usb_ethernet_mode=... on the kernel command line wins: sdboot_ram passes the U-Boot variable, which the SD card's
+# uEnv.txt sets (ncm by default, rndis for a host without an NCM driver), so no environment write is needed (doc 17r)
+CMDLINE_ETH_MODE=$(sed -n 's/.*usb_ethernet_mode=\([a-z]*\).*/\1/p' /proc/cmdline 2> /dev/null)
+[ -n "$CMDLINE_ETH_MODE" ] && USB_ETH_MODE=$CMDLINE_ETH_MODE
 AUDIO_MODE=$(fw_printenv -n audio_mode 2> /dev/null || echo off | tr -cd '[a-zA-Z0-9]._-')
 # nproc honours the affinity mask, which leaves out cores removed with isolcpus=, so count the CPUs in /proc/cpuinfo
 NB_CORE=$(grep -c '^processor' /proc/cpuinfo 2> /dev/null || echo 1)

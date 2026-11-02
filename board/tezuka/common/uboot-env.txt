@@ -165,6 +165,7 @@ loaddfu=\
     fi; \
   fi
 maxcpus=2
+usb_ethernet_mode=ncm
 
 netmask=255.255.255.0
 
@@ -259,7 +260,11 @@ sdboot_ram=\
     if test "${rt_isolcpus}" = "1"; then \
       setenv rt_args isolcpus=1 irqaffinity=0; \
     fi; \
-    setenv bootargs console=ttyPS0,115200 rootfstype=ramfs root=/dev/ram0 rw rootwait earlycon clk_ignore_unused cpuidle.off=1 ${rt_args} uio_pdrv_genirq.of_id=uio_pdrv_genirq UBOOT_MODEBOOT=$modeboot UBOOT_VERSION='"\'${uboot-version}'\"' \
+    setenv usb_args; \
+    if test -n "${usb_ethernet_mode}"; then \
+      setenv usb_args usb_ethernet_mode=${usb_ethernet_mode}; \
+    fi; \
+    setenv bootargs console=ttyPS0,115200 rootfstype=ramfs root=/dev/ram0 rw rootwait earlycon clk_ignore_unused cpuidle.off=1 ${rt_args} ${usb_args} uio_pdrv_genirq.of_id=uio_pdrv_genirq UBOOT_MODEBOOT=$modeboot UBOOT_VERSION='"\'${uboot-version}'\"' \
     && bootm ${fit_load_address} ${ramdisk_load_address} ${devicetree_load_address}; \
   fi
 
